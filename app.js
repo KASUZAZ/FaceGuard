@@ -3,14 +3,13 @@ import QRCode from 'qrcode';
 import jsQR from 'jsqr';
 import { Capacitor } from '@capacitor/core';
 import { LocalNotifications } from '@capacitor/local-notifications';
-import { PushNotifications } from '@capacitor/push-notifications';
 import { Browser } from '@capacitor/browser';
 import { App } from '@capacitor/app';
 
 const SUPABASE_URL = 'https://rerhdlfuiemsuzygjzqx.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_e-BT7oYj2e5sl07riD-kgQ_MLRUiaT6';
-const APP_VERSION = '2.1.0';
-const APP_VERSION_CODE = 3;
+const APP_VERSION = '2.1.1';
+const APP_VERSION_CODE = 4;
 const ONLINE_WINDOW_MS = 120_000;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
@@ -35,7 +34,7 @@ const state = {
   pairingTimer: null,
   toastTimer: null,
   currentEvent: null,
-  pushListenersReady: false,
+  initializePromise: null,
   latestRelease: null,
   scannerStream: null,
   scannerFrame: null,
@@ -212,6 +211,7 @@ async function loadDevices(preferredDeviceId = null) {
     supabase.from('faceguard_device_members').select('device_id,user_id,role,created_at').eq('user_id', userId),
   ]);
   if (devicesResult.error) throw devicesResult.error;
+  if (membershipsResult.error) throw membershipsResult.error;
   state.devices = devicesResult.data || [];
   state.memberships = new Map((membershipsResult.data || []).map((membership) => [membership.device_id, membership]));
 
@@ -462,8 +462,7 @@ async function requestNotifications() {
         id: 'faceguard_alerts', name: 'Amaran FaceGuard', description: 'Amaran gerakan kamera',
         importance: 5, visibility: 1, vibration: true, lights: true,
       });
-      await setupPushNotifications();
-      $('#notificationStatus').textContent = 'Alert tempatan aktif; push memerlukan Firebase';
+      $('#notificationStatus').textContent = 'Alert tempatan aktif';
       toast('Notifikasi FaceGuard diaktifkan');
     } catch (error) {
       $('#notificationStatus').textContent = error.message;
@@ -475,29 +474,6 @@ async function requestNotifications() {
   const permission = await Notification.requestPermission();
   $('#notificationStatus').textContent = permission === 'granted' ? 'Notifikasi web aktif' : 'Kebenaran ditolak';
   toast(permission === 'granted' ? 'Notifikasi web diaktifkan' : 'Kebenaran notifikasi tidak diberikan');
-}
-
-async function setupPushNotifications() {
-  if (!Capacitor.isNativePlatform()) return;
-  if (!state.pushListenersReady) {
-    state.pushListenersReady = true;
-    await PushNotifications.addListener('registration', async ({ value }) => {
-      const userId = state.session?.user?.id;
-      if (!userId) return;
-      const result = await supabase.from('faceguard_push_tokens').upsert({
-        user_id: userId, token: value, platform: Capacitor.getPlatform(), device_instance_id: value.slice(-16), updated_at: new Date().toISOString(),
-      }, { onConflict: 'token' });
-      $('#notificationStatus').textContent = result.error ? `Token gagal: ${result.error.message}` : 'Push notification aktif';
-    });
-    await PushNotifications.addListener('registrationError', ({ error }) => {
-      $('#notificationStatus').textContent = 'Firebase belum disambungkan';
-      console.warn('Push registration failed', error);
-    });
-    await PushNotifications.addListener('pushNotificationActionPerformed', () => showPage('eventsPage', 'Aktiviti'));
-  }
-  let permission = await PushNotifications.checkPermissions();
-  if (permission.receive === 'prompt') permission = await PushNotifications.requestPermissions();
-  if (permission.receive === 'granted') await PushNotifications.register();
 }
 
 async function showMotionNotification(row) {
@@ -811,13 +787,18 @@ function showPage(id, title) {
 
 async function initializeSignedInApp() {
   renderAuth();
-  try {
-    await loadDevices();
-    await setupPushNotifications();
-    await checkForUpdate(false);
-  } catch (error) {
-    toast(error.message);
-  }
+  if (state.initializePromise) return state.initializePromise;
+  state.initializePromise = (async () => {
+    try {
+      await loadDevices();
+      await checkForUpdate(false);
+    } catch (error) {
+      toast(error.message);
+    }
+  })().finally(() => {
+    state.initializePromise = null;
+  });
+  return state.initializePromise;
 }
 
 document.querySelectorAll('.auth-tab').forEach((button) => button.addEventListener('click', () => setAuthMode(button.dataset.authMode)));
@@ -830,8 +811,12 @@ document.querySelectorAll('.filter').forEach((button) => button.addEventListener
 }));
 
 $('#refreshBtn').addEventListener('click', async () => {
-  await loadDevices(state.activeDevice?.id);
-  toast('FaceGuard dikemas kini');
+  try {
+    await loadDevices(state.activeDevice?.id);
+    toast('FaceGuard dikemas kini');
+  } catch (error) {
+    toast(`Muat semula gagal: ${error.message}`);
+  }
 });
 $('#deviceSelect').addEventListener('change', async (event) => {
   state.activeDevice = state.devices.find((device) => device.id === event.target.value) || null;

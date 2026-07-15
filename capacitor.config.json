@@ -5,10 +5,5 @@
   "server": {
     "androidScheme": "https",
     "cleartext": true
-  },
-  "plugins": {
-    "PushNotifications": {
-      "presentationOptions": ["sound", "alert", "banner", "list"]
-    }
   }
 }
