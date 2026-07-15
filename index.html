@@ -3,24 +3,47 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#8e1f2a">
-  <meta name="description" content="FaceGuard — pemantauan gerakan ESP32-CAM secara masa nyata.">
+  <meta name="theme-color" content="#7d1f2b">
+  <meta name="description" content="FaceGuard — kamera keselamatan ESP32-CAM dengan live stream, rakaman gerakan dan akses keluarga.">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="FaceGuard">
-  <title>FaceGuard</title>
+  <title>FaceGuard CCTV</title>
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/icon.svg">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <div class="app-shell">
+  <section id="authScreen" class="auth-screen">
+    <div class="auth-card">
+      <div class="auth-logo">F</div>
+      <p class="eyebrow">ESP32-CAM SECURITY</p>
+      <h1>FaceGuard</h1>
+      <p class="auth-lead">Log masuk untuk melihat kamera yang dikongsi dengan akaun anda.</p>
+      <div class="auth-tabs">
+        <button class="auth-tab active" data-auth-mode="signin">Log masuk</button>
+        <button class="auth-tab" data-auth-mode="signup">Daftar</button>
+      </div>
+      <form id="authForm">
+        <label>E-mel<input id="authEmail" type="email" autocomplete="email" required placeholder="nama@email.com"></label>
+        <label>Kata laluan<input id="authPassword" type="password" autocomplete="current-password" minlength="6" required placeholder="Minimum 6 aksara"></label>
+        <button id="authSubmit" class="primary-btn" type="submit">Log masuk</button>
+      </form>
+      <p id="authMessage" class="form-message" role="status"></p>
+    </div>
+  </section>
+
+  <div id="appShell" class="app-shell" hidden>
     <header class="app-header">
       <div class="brand-row">
         <div class="brand-mark" aria-hidden="true">F</div>
-        <div><span>FACEGUARD</span><h1 id="pageTitle">Kamera</h1></div>
+        <div class="brand-copy"><span>FACEGUARD CCTV</span><h1 id="pageTitle">Live</h1></div>
         <button id="refreshBtn" class="icon-btn" aria-label="Muat semula">↻</button>
+      </div>
+      <div class="device-bar">
+        <select id="deviceSelect" aria-label="Pilih kamera"><option value="">Tiada kamera</option></select>
+        <button id="quickAddDevice" class="add-device-btn">＋ Kamera</button>
       </div>
       <div class="status-row">
         <span id="connectionBadge" class="status-pill connecting"><i></i>Menyambung</span>
@@ -29,69 +52,117 @@
     </header>
 
     <main>
-      <section id="homePage" class="page active" aria-labelledby="cameraHeading">
+      <section id="homePage" class="page active">
         <article class="camera-card">
-          <div class="camera-head"><div><small>ESP32-CAM</small><h2 id="cameraHeading">Pintu hadapan</h2></div><span id="eventTotal">0 event</span></div>
+          <div class="camera-head">
+            <div><small id="deviceCode">ESP32-CAM</small><h2 id="cameraHeading">Tambah kamera dahulu</h2></div>
+            <span id="liveBadge" class="live-badge offline">OFFLINE</span>
+          </div>
           <div id="cameraPreview" class="camera-preview">
-            <img id="latestImage" alt="Gambar terkini ESP32-CAM" hidden>
-            <div id="cameraEmpty" class="empty-preview"><b>Tiada gambar lagi</b><span>Hidupkan ESP32-CAM untuk mula memantau.</span></div>
+            <img id="liveStream" alt="Live stream ESP32-CAM" hidden>
+            <img id="latestImage" alt="Gambar gerakan terkini" hidden>
+            <div id="cameraEmpty" class="empty-preview"><b>Belum ada kamera</b><span>Tekan “＋ Kamera” dan tunjuk QR Wi‑Fi kepada lensa ESP32-CAM.</span></div>
             <div class="camera-overlay"><span id="latestStatus">Menunggu kamera</span><time id="latestTime">—</time></div>
           </div>
           <div class="camera-metrics">
-            <div><span>Kaedah</span><b>Gerakan kamera</b></div>
-            <div><span>Data</span><b>Supabase</b></div>
-            <div><span>Mod</span><b>Automatik</b></div>
+            <div><span>Rangkaian</span><b id="networkMetric">—</b></div>
+            <div><span>Aktiviti</span><b id="eventTotal">0</b></div>
+            <div><span>Akses</span><b id="memberMetric">0 / 5</b></div>
           </div>
         </article>
 
-        <div class="action-grid">
-          <button id="viewLatestBtn" class="primary-action">Lihat gambar terkini</button>
-          <button id="notifyBtn" class="secondary-action">Aktifkan notifikasi</button>
+        <div class="action-grid three">
+          <button id="toggleStreamBtn" class="primary-action">Mulakan live</button>
+          <button id="snapshotBtn" class="secondary-action">Ambil gambar</button>
+          <button id="notifyBtn" class="secondary-action">Alert</button>
         </div>
 
-        <article class="info-card"><span>✓</span><div><b>Pemantauan automatik aktif</b><p>ESP32-CAM membandingkan perubahan imej dan menghantar bukti apabila gerakan dikesan.</p></div></article>
+        <article id="systemInfo" class="info-card"><span>i</span><div><b>Live memerlukan Wi‑Fi yang sama</b><p>Telefon dan ESP32-CAM mesti berada pada rangkaian Wi‑Fi yang sama untuk paparan video langsung.</p></div></article>
       </section>
 
       <section id="eventsPage" class="page">
-        <div class="section-heading"><div><small>SECURITY LOG</small><h2>Aktiviti</h2></div><span id="unreadBadge">0 baharu</span></div>
+        <div class="section-heading"><div><small>SECURITY LOG</small><h2>Rakaman gerakan</h2></div><span id="unreadBadge">0 baharu</span></div>
         <div class="filter-row" role="group" aria-label="Tapis aktiviti">
           <button class="filter active" data-filter="all">Semua</button>
           <button class="filter" data-filter="image">Gambar</button>
           <button class="filter" data-filter="video">Video</button>
         </div>
-        <div id="eventList" class="event-list"><div class="empty-state">Sedang mendapatkan aktiviti…</div></div>
+        <div id="eventList" class="event-list"><div class="empty-state">Pilih kamera untuk melihat aktiviti.</div></div>
       </section>
 
-      <section id="galleryPage" class="page">
-        <div class="section-heading"><div><small>MEDIA CLOUD</small><h2>Galeri</h2></div><span id="mediaTotal">0 media</span></div>
-        <div id="galleryGrid" class="gallery-grid"><div class="empty-state">Belum ada media.</div></div>
+      <section id="devicesPage" class="page">
+        <div class="section-heading"><div><small>MY CAMERAS</small><h2>Peranti</h2></div><span id="deviceTotal">0 kamera</span></div>
+        <button id="addDeviceBtn" class="wide-action">＋ Setup kamera dengan QR Wi‑Fi</button>
+        <div id="deviceList" class="device-list"></div>
+        <article class="invite-card">
+          <div><small>KONGSIAN KAMERA</small><h3>Masukkan kod jemputan</h3><p>Kod diberikan oleh pemilik kamera dan sah selama 24 jam.</p></div>
+          <form id="acceptInviteForm"><input id="inviteCodeInput" autocomplete="off" placeholder="Contoh: AB12-CD34"><button type="submit">Tambah</button></form>
+        </article>
       </section>
 
       <section id="settingsPage" class="page">
         <div class="section-heading"><div><small>FACEGUARD</small><h2>Tetapan</h2></div></div>
         <article class="settings-card">
-          <div><span class="setting-icon">⌂</span><div><b>Pasang aplikasi</b><small>Tambah FaceGuard pada skrin utama telefon.</small></div><button id="installBtn">Pasang</button></div>
-          <div><span class="setting-icon">◉</span><div><b>Notifikasi</b><small>Amaran ketika FaceGuard sedang dibuka.</small></div><button id="settingsNotifyBtn">Aktifkan</button></div>
-          <div><span class="setting-icon">↻</span><div><b>Realtime</b><small id="realtimeDetail">Sedang menyambung ke Supabase.</small></div><span id="realtimeDot" class="mini-dot"></span></div>
+          <div><span class="setting-icon">●</span><div><b>Akaun</b><small id="accountEmail">—</small></div><button id="signOutBtn">Keluar</button></div>
+          <div><span class="setting-icon">!</span><div><b>Notifikasi gerakan</b><small id="notificationStatus">Belum diaktifkan</small></div><button id="settingsNotifyBtn">Aktifkan</button></div>
+          <div><span class="setting-icon">↻</span><div><b>Kemas kini aplikasi</b><small id="updateStatus">Versi 2.0.0</small></div><button id="checkUpdateBtn">Semak</button></div>
+          <div><span class="setting-icon">≈</span><div><b>Supabase Realtime</b><small id="realtimeDetail">Sedang menyambung.</small></div><span id="realtimeDot" class="mini-dot"></span></div>
         </article>
-        <article id="iosHelp" class="install-help" hidden><b>Cara pasang pada iPhone</b><p>Buka FaceGuard dalam Safari, tekan butang Share, kemudian pilih <strong>Add to Home Screen</strong>.</p></article>
-        <p class="privacy-note">Media disimpan dalam projek Supabase FaceGuard. Aplikasi ini tidak menggunakan kamera telefon.</p>
+
+        <section class="member-section">
+          <div class="member-head"><div><small>AKSES KAMERA</small><h3>Pengguna</h3></div><button id="createInviteBtn">＋ Jemput</button></div>
+          <div id="memberList" class="member-list"><div class="empty-state compact">Pilih kamera dahulu.</div></div>
+        </section>
+
+        <article id="iosHelp" class="install-help" hidden><b>Pengguna iPhone</b><p>APK hanya untuk Android. Buka versi web dalam Safari, tekan Share, kemudian pilih <strong>Add to Home Screen</strong>.</p></article>
+        <p class="privacy-note">Live stream bergerak terus dalam Wi‑Fi tempatan. Bukti gerakan disimpan dalam Supabase dan hanya ahli kamera boleh melihatnya.</p>
       </section>
     </main>
 
     <nav class="bottom-nav" aria-label="Navigasi utama">
-      <button class="nav-btn active" data-page="homePage" data-title="Kamera"><span>⌂</span><small>Kamera</small></button>
-      <button class="nav-btn" data-page="eventsPage" data-title="Aktiviti"><span>!</span><small>Aktiviti</small><i id="navBadge" hidden>0</i></button>
-      <button class="nav-btn" data-page="galleryPage" data-title="Galeri"><span>▦</span><small>Galeri</small></button>
+      <button class="nav-btn active" data-page="homePage" data-title="Live"><span>◉</span><small>Live</small></button>
+      <button class="nav-btn" data-page="eventsPage" data-title="Aktiviti"><span>▤</span><small>Aktiviti</small><i id="navBadge" hidden>0</i></button>
+      <button class="nav-btn" data-page="devicesPage" data-title="Peranti"><span>▣</span><small>Peranti</small></button>
       <button class="nav-btn" data-page="settingsPage" data-title="Tetapan"><span>⚙</span><small>Tetapan</small></button>
     </nav>
   </div>
 
+  <dialog id="provisionModal" class="sheet-dialog">
+    <form method="dialog" class="dialog-head"><div><small>SETUP KAMERA</small><h2>QR Wi‑Fi</h2></div><button value="cancel" aria-label="Tutup">×</button></form>
+    <div id="wifiStep" class="dialog-body">
+      <p class="step-note">Masukkan Wi‑Fi 2.4 GHz yang akan digunakan oleh telefon dan ESP32-CAM.</p>
+      <form id="wifiForm">
+        <label>Nama Wi‑Fi (SSID)<input id="wifiSsid" required autocomplete="off" placeholder="Contoh: WiFi Rumah"></label>
+        <label>Kata laluan Wi‑Fi<input id="wifiPassword" type="password" required minlength="8" autocomplete="off" placeholder="Kata laluan Wi‑Fi"></label>
+        <button class="primary-btn" type="submit">Jana QR setup</button>
+      </form>
+    </div>
+    <div id="qrStep" class="dialog-body" hidden>
+      <div class="qr-frame"><canvas id="wifiQrCanvas" width="290" height="290"></canvas></div>
+      <h3>Tunjukkan QR kepada lensa kamera</h3>
+      <ol class="setup-steps"><li>Hidupkan atau reset ESP32-CAM.</li><li>Halakan lensa kepada QR pada jarak 15–25 cm.</li><li>Tunggu sehingga kamera muncul dalam aplikasi.</li></ol>
+      <div class="pairing-status"><i></i><span id="pairingMessage">Menunggu kamera mengimbas QR…</span></div>
+      <button id="restartSetupBtn" class="text-btn" type="button">Tukar Wi‑Fi</button>
+    </div>
+  </dialog>
+
+  <dialog id="mediaModal" class="media-dialog">
+    <form method="dialog"><button class="modal-close" value="cancel" aria-label="Tutup">×</button></form>
+    <img id="modalImage" alt="Rakaman FaceGuard">
+    <video id="modalVideo" controls playsinline hidden></video>
+    <div class="modal-copy"><b id="modalTitle"></b><span id="modalTime"></span><div><a id="modalDownload" target="_blank" rel="noopener">Buka fail asal</a><button id="deleteEventBtn" class="danger-btn">Padam</button></div></div>
+  </dialog>
+
+  <dialog id="inviteModal" class="small-dialog">
+    <form method="dialog" class="dialog-head"><div><small>KONGSI KAMERA</small><h2>Kod jemputan</h2></div><button value="cancel">×</button></form>
+    <div class="dialog-body">
+      <label>Tahap akses<select id="inviteRole"><option value="viewer">Lihat sahaja</option><option value="editor">Boleh padam media</option></select></label>
+      <button id="generateInviteBtn" class="primary-btn">Jana kod</button>
+      <div id="inviteResult" class="invite-result" hidden><small>KOD SAH 24 JAM</small><strong id="generatedInviteCode"></strong><button id="copyInviteBtn">Salin kod</button></div>
+    </div>
+  </dialog>
+
   <div id="toast" role="status" aria-live="polite"></div>
-  <div id="mediaModal" class="modal" hidden>
-    <button id="closeModal" class="modal-close" aria-label="Tutup">×</button>
-    <div class="modal-content"><img id="modalImage" alt="Paparan media FaceGuard"><div><b id="modalTitle"></b><span id="modalTime"></span><a id="modalDownload" target="_blank" rel="noopener">Buka fail asal</a></div></div>
-  </div>
   <script type="module" src="/app.js"></script>
 </body>
 </html>

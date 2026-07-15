@@ -3,6 +3,12 @@
   "appName": "FaceGuard",
   "webDir": "dist",
   "server": {
-    "androidScheme": "https"
+    "androidScheme": "https",
+    "cleartext": true
+  },
+  "plugins": {
+    "PushNotifications": {
+      "presentationOptions": ["sound", "alert", "banner", "list"]
+    }
   }
 }
