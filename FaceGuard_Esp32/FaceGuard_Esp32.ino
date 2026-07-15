@@ -12,16 +12,17 @@
 // Aliran setup: aplikasi menjana QR -> kamera mengimbas -> Wi-Fi disimpan
 // -> kamera didaftarkan ke akaun -> live MJPEG dan alert gerakan tersedia.
 
-const char* FIRMWARE_VERSION = "2.0.0";
+const char* FIRMWARE_VERSION = "2.1.0";
 const char* DEVICE_FUNCTION_URL =
     SUPABASE_URL "/functions/v1/faceguard-device";
 
 const uint32_t DETECTION_INTERVAL_MS = 700;
-const uint32_t EVENT_COOLDOWN_MS = 20000;
-const uint32_t HEARTBEAT_INTERVAL_MS = 60000;
+const uint32_t STREAM_DETECTION_INTERVAL_MS = 1400;
+const uint32_t EVENT_COOLDOWN_MS = 15000;
+const uint32_t HEARTBEAT_INTERVAL_MS = 30000;
 const uint32_t WIFI_RETRY_INTERVAL_MS = 10000;
-const uint8_t PIXEL_DIFFERENCE_THRESHOLD = 30;
-const uint8_t MOTION_PERCENT_THRESHOLD = 15;
+const uint8_t PIXEL_DIFFERENCE_THRESHOLD = 24;
+const uint8_t MOTION_PERCENT_THRESHOLD = 9;
 const uint8_t REQUIRED_MOTION_FRAMES = 2;
 const uint8_t SAMPLE_STEP = 4;
 const size_t MOTION_SAMPLE_CAPACITY = 80 * 60;
@@ -66,12 +67,14 @@ bool parseSetupPayload(const String& payload, String& ssid,
 bool ssidLooksLike5GHz(const String& ssid);
 bool connectWiFi(uint32_t timeoutMs = 12000);
 bool initializeCamera();
-void startCameraServers();
+bool startCameraServers();
 bool provisionDevice();
 bool sendHeartbeat();
 bool uploadSnapshot(const String& eventKind);
 bool detectMotion();
 bool validRequestToken(httpd_req_t* request);
+void setCors(httpd_req_t* request);
+esp_err_t optionsHandler(httpd_req_t* request);
 
 void setup() {
   Serial.begin(115200);
@@ -100,7 +103,11 @@ void setup() {
   }
 
   if (!initializeCamera()) return;
-  startCameraServers();
+  if (!startCameraServers()) {
+    Serial.println("Server live gagal dimulakan. Kamera akan restart.");
+    delay(1500);
+    ESP.restart();
+  }
 
   if (!provisioned || !setupToken.isEmpty()) {
     provisionDevice();
@@ -116,7 +123,7 @@ void loop() {
   if (WiFi.status() != WL_CONNECTED) {
     if (millis() - lastWiFiRetryAt >= WIFI_RETRY_INTERVAL_MS) {
       lastWiFiRetryAt = millis();
-      connectWiFi(8000);
+      if (connectWiFi(8000) && provisioned) sendHeartbeat();
     }
     delay(20);
     return;
@@ -134,14 +141,9 @@ void loop() {
     uploadSnapshot("manual_snapshot");
   }
 
-  if (activeStreamClients > 0) {
-    baselineReady = false;
-    consecutiveMotionFrames = 0;
-    delay(30);
-    return;
-  }
-
-  if (millis() - lastDetectionAt >= DETECTION_INTERVAL_MS) {
+  const uint32_t detectionInterval = activeStreamClients > 0
+      ? STREAM_DETECTION_INTERVAL_MS : DETECTION_INTERVAL_MS;
+  if (millis() - lastDetectionAt >= detectionInterval) {
     lastDetectionAt = millis();
     if (detectMotion()) {
       if (consecutiveMotionFrames < 255) consecutiveMotionFrames++;
@@ -153,8 +155,7 @@ void loop() {
         millis() - lastEventAt >= EVENT_COOLDOWN_MS;
     if (cooldownDone && consecutiveMotionFrames >= REQUIRED_MOTION_FRAMES) {
       consecutiveMotionFrames = 0;
-      lastEventAt = millis();
-      uploadSnapshot("pergerakan_kamera");
+      if (uploadSnapshot("pergerakan_kamera")) lastEventAt = millis();
       baselineReady = false;
     }
   }
@@ -346,7 +347,16 @@ bool validRequestToken(httpd_req_t* request) {
 
 void setCors(httpd_req_t* request) {
   httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
+  httpd_resp_set_hdr(request, "Access-Control-Allow-Methods", "GET, OPTIONS");
+  httpd_resp_set_hdr(request, "Access-Control-Allow-Headers", "Content-Type");
+  httpd_resp_set_hdr(request, "Access-Control-Allow-Private-Network", "true");
   httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+}
+
+esp_err_t optionsHandler(httpd_req_t* request) {
+  setCors(request);
+  httpd_resp_set_status(request, "204 No Content");
+  return httpd_resp_send(request, nullptr, 0);
 }
 
 esp_err_t statusHandler(httpd_req_t* request) {
@@ -355,7 +365,8 @@ esp_err_t statusHandler(httpd_req_t* request) {
   httpd_resp_set_type(request, "application/json");
   String response = "{\"ok\":true,\"device_code\":\"" + deviceCode +
       "\",\"firmware\":\"" + FIRMWARE_VERSION + "\",\"streams\":" +
-      String(activeStreamClients) + "}";
+      String(activeStreamClients) + ",\"motion_enabled\":true,\"rssi\":" +
+      String(WiFi.RSSI()) + ",\"ip\":\"" + WiFi.localIP().toString() + "\"}";
   return httpd_resp_sendstr(request, response.c_str());
 }
 
@@ -366,6 +377,28 @@ esp_err_t snapshotHandler(httpd_req_t* request) {
   httpd_resp_set_status(request, "202 Accepted");
   httpd_resp_set_type(request, "application/json");
   return httpd_resp_sendstr(request, "{\"ok\":true,\"queued\":true}");
+}
+
+esp_err_t captureHandler(httpd_req_t* request) {
+  if (!validRequestToken(request)) return httpd_resp_send_err(request, HTTPD_401_UNAUTHORIZED, "Token tidak sah");
+  setCors(request);
+  if (xSemaphoreTake(cameraMutex, pdMS_TO_TICKS(1500)) != pdTRUE) {
+    httpd_resp_set_status(request, "503 Service Unavailable");
+    return httpd_resp_sendstr(request, "Kamera sibuk");
+  }
+  camera_fb_t* frame = esp_camera_fb_get();
+  if (!frame || frame->format != PIXFORMAT_JPEG) {
+    if (frame) esp_camera_fb_return(frame);
+    xSemaphoreGive(cameraMutex);
+    return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "Gambar gagal");
+  }
+  httpd_resp_set_type(request, "image/jpeg");
+  httpd_resp_set_hdr(request, "Content-Disposition", "inline; filename=faceguard.jpg");
+  const esp_err_t result = httpd_resp_send(
+      request, reinterpret_cast<const char*>(frame->buf), frame->len);
+  esp_camera_fb_return(frame);
+  xSemaphoreGive(cameraMutex);
+  return result;
 }
 
 esp_err_t streamHandler(httpd_req_t* request) {
@@ -406,29 +439,53 @@ esp_err_t streamHandler(httpd_req_t* request) {
   return result;
 }
 
-void startCameraServers() {
+bool startCameraServers() {
+  bool controlStarted = false;
+  bool streamStarted = false;
   httpd_config_t controlConfig = HTTPD_DEFAULT_CONFIG();
   controlConfig.server_port = 80;
   controlConfig.ctrl_port = 32768;
   controlConfig.max_uri_handlers = 6;
+  controlConfig.lru_purge_enable = true;
+  controlConfig.uri_match_fn = httpd_uri_match_wildcard;
   if (httpd_start(&controlServer, &controlConfig) == ESP_OK) {
     httpd_uri_t statusUri = { .uri = "/status", .method = HTTP_GET,
       .handler = statusHandler, .user_ctx = nullptr };
     httpd_uri_t snapshotUri = { .uri = "/api/snapshot", .method = HTTP_GET,
       .handler = snapshotHandler, .user_ctx = nullptr };
+    httpd_uri_t captureUri = { .uri = "/capture", .method = HTTP_GET,
+      .handler = captureHandler, .user_ctx = nullptr };
+    httpd_uri_t optionsUri = { .uri = "/*", .method = HTTP_OPTIONS,
+      .handler = optionsHandler, .user_ctx = nullptr };
     httpd_register_uri_handler(controlServer, &statusUri);
     httpd_register_uri_handler(controlServer, &snapshotUri);
+    httpd_register_uri_handler(controlServer, &captureUri);
+    httpd_register_uri_handler(controlServer, &optionsUri);
+    controlStarted = true;
+    Serial.println("API kamera aktif pada port 80.");
+  } else {
+    Serial.println("API kamera port 80 gagal dimulakan.");
   }
 
   httpd_config_t streamConfig = HTTPD_DEFAULT_CONFIG();
   streamConfig.server_port = 81;
   streamConfig.ctrl_port = 32769;
   streamConfig.stack_size = 8192;
+  streamConfig.lru_purge_enable = true;
+  streamConfig.uri_match_fn = httpd_uri_match_wildcard;
   if (httpd_start(&streamServer, &streamConfig) == ESP_OK) {
     httpd_uri_t streamUri = { .uri = "/stream", .method = HTTP_GET,
       .handler = streamHandler, .user_ctx = nullptr };
+    httpd_uri_t optionsUri = { .uri = "/*", .method = HTTP_OPTIONS,
+      .handler = optionsHandler, .user_ctx = nullptr };
     httpd_register_uri_handler(streamServer, &streamUri);
+    httpd_register_uri_handler(streamServer, &optionsUri);
+    streamStarted = true;
+    Serial.println("Live MJPEG aktif pada port 81.");
+  } else {
+    Serial.println("Live MJPEG port 81 gagal dimulakan.");
   }
+  return controlStarted && streamStarted;
 }
 
 int postDeviceAction(const String& action, const String& jsonBody) {

@@ -1,4 +1,4 @@
-# Panduan ESP32-CAM FaceGuard 2.0
+# Panduan ESP32-CAM FaceGuard 2.1
 
 ## Barang diperlukan
 
@@ -11,9 +11,12 @@
 PIR, buzzer dan breadboard tidak digunakan dalam versi ini. Kad microSD hanya
 diperlukan jika mahu menambah rakaman video panjang kemudian.
 
-## Keadaan papan sekarang
+## Firmware automatik 2.1
 
-Firmware 2.0 telah dimuat naik melalui COM5. Semasa belum disetup, Serial
+Firmware 2.1 menghidupkan Live secara automatik daripada aplikasi, terus
+mengesan gerakan semasa Live sedang ditonton, dan menyimpan gambar gerakan ke
+Supabase tanpa perlu menekan **Ambil gambar**. Firmware ini perlu diflash ke
+ESP32-CAM sebelum ciri automatik boleh digunakan. Semasa belum disetup, Serial
 Monitor 115200 akan memaparkan:
 
 ```text
@@ -50,10 +53,24 @@ laluan Wi-Fi tidak lagi disimpan dalam fail tersebut.
 
 ## Apa yang boleh digunakan tanpa sensor/microSD
 
-- live video bergerak dalam aplikasi;
-- pengesanan perubahan imej menggunakan kamera;
+- live video bergerak yang auto-connect dan auto-reconnect dalam aplikasi;
+- fallback bingkai JPEG jika telefon tidak serasi dengan MJPEG;
+- pengesanan perubahan imej yang terus berjalan ketika Live aktif;
 - gambar alert automatik;
 - snapshot manual;
 - notifikasi Realtime dan pemadaman gambar.
 
 Rakaman video panjang tidak boleh disimpan secara stabil tanpa kad microSD.
+
+## Jika Live masih tidak keluar
+
+1. Pastikan telefon dan ESP32-CAM berada pada router serta subnet yang sama,
+   bukan rangkaian `Guest` yang mengasingkan peranti.
+2. Matikan `AP isolation`, `client isolation` atau `wireless isolation` pada
+   router jika pilihan itu aktif.
+3. Pastikan Serial Monitor memaparkan `API kamera aktif pada port 80` dan
+   `Live MJPEG aktif pada port 81`.
+4. Dalam aplikasi, nilai **Rangkaian** mesti menunjukkan alamat IP kamera dan
+   status kamera mesti Online.
+5. Bekalkan ESP32-CAM dengan 5V yang stabil; bekalan lemah lazimnya menyebabkan
+   kamera restart ketika stream bermula.

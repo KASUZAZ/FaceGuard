@@ -7,9 +7,12 @@ import { App } from '@capacitor/app';
 
 const SUPABASE_URL = 'https://rerhdlfuiemsuzygjzqx.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_e-BT7oYj2e5sl07riD-kgQ_MLRUiaT6';
-const APP_VERSION = '2.1.3';
-const APP_VERSION_CODE = 6;
+const APP_VERSION = '2.2.0';
+const APP_VERSION_CODE = 7;
 const ONLINE_WINDOW_MS = 120_000;
+const STREAM_RETRY_MS = 7_000;
+const STREAM_HEALTH_MS = 12_000;
+const ACTIVITY_POLL_MS = 20_000;
 
 const memoryStorage = new Map();
 const safeStorage = {
@@ -58,6 +61,13 @@ const state = {
   unread: 0,
   channel: null,
   streamActive: false,
+  streamConnecting: false,
+  streamGeneration: 0,
+  streamRetryTimer: null,
+  streamHealthTimer: null,
+  streamFrameTimer: null,
+  autoStreamEnabled: safeStorage.getItem('faceguard-auto-live') !== 'false',
+  activityPollTimer: null,
   pairingTimer: null,
   toastTimer: null,
   currentEvent: null,
@@ -271,7 +281,8 @@ function renderDeviceList() {
 }
 
 async function selectActiveDevice() {
-  stopStream();
+  stopStream({ manual: false });
+  stopActivityPolling();
   state.rows = [];
   state.signedUrls.clear();
   state.signedVideoUrls.clear();
@@ -285,8 +296,25 @@ async function selectActiveDevice() {
   }
   await Promise.all([loadActivities(), loadMembers()]);
   subscribeRealtime();
+  startActivityPolling();
   renderCamera();
   renderDeviceList();
+  if (state.autoStreamEnabled && streamUrl()) {
+    startStream({ automatic: true });
+  }
+}
+
+function stopActivityPolling() {
+  clearInterval(state.activityPollTimer);
+  state.activityPollTimer = null;
+}
+
+function startActivityPolling() {
+  stopActivityPolling();
+  if (!state.activeDevice) return;
+  state.activityPollTimer = setInterval(() => {
+    if (!document.hidden && state.activeDevice) loadActivities().catch(console.warn);
+  }, ACTIVITY_POLL_MS);
 }
 
 async function loadActivities(showToast = false) {
@@ -327,8 +355,8 @@ function renderCamera() {
   $('#networkMetric').textContent = device?.local_ip || '—';
   $('#eventTotal').textContent = String(state.rows.length);
   $('#memberMetric').textContent = `${state.members.length} / 5`;
-  $('#liveBadge').className = `live-badge ${isDeviceOnline(device) ? 'online' : 'offline'}`;
-  $('#liveBadge').textContent = state.streamActive ? 'LIVE' : isDeviceOnline(device) ? 'ONLINE' : 'OFFLINE';
+  $('#liveBadge').className = `live-badge ${state.streamActive || isDeviceOnline(device) ? 'online' : 'offline'}`;
+  $('#liveBadge').textContent = state.streamConnecting ? 'CONNECTING' : state.streamActive ? 'LIVE' : isDeviceOnline(device) ? 'ONLINE' : 'OFFLINE';
 
   const latestImage = $('#latestImage');
   const empty = $('#cameraEmpty');
@@ -418,10 +446,18 @@ async function subscribeRealtime() {
       event: 'UPDATE', schema: 'public', table: 'faceguard_devices', filter: `id=eq.${deviceId}`,
     }, ({ new: device }) => {
       const index = state.devices.findIndex((item) => item.id === device.id);
-      if (index >= 0) state.devices[index] = { ...state.devices[index], ...device };
+      if (index < 0) return;
+      const previousIp = state.devices[index].local_ip;
+      state.devices[index] = { ...state.devices[index], ...device };
       state.activeDevice = state.devices[index];
       renderCamera();
       renderDeviceList();
+      if (previousIp !== device.local_ip && (state.streamActive || state.streamConnecting)) {
+        stopStream({ manual: false });
+      }
+      if (state.autoStreamEnabled && !state.streamActive && !state.streamConnecting && streamUrl()) {
+        startStream({ automatic: true });
+      }
     })
     .subscribe((status) => setConnection(status));
 }
@@ -433,12 +469,125 @@ function streamUrl(path = '/stream') {
   return `http://${device.local_ip}${port}${path}?token=${encodeURIComponent(device.stream_token)}`;
 }
 
-function startStream() {
+function canReachLocalCamera() {
+  return Capacitor.isNativePlatform() || ['http:', 'file:'].includes(window.location.protocol);
+}
+
+async function cameraFetch(path, timeoutMs = 6_000) {
+  const url = streamUrl(path);
+  if (!url) throw new Error('Kamera belum online atau belum selesai setup.');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { cache: 'no-store', signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function probeCamera() {
+  const response = await cameraFetch('/status', 4_500);
+  if (!response.ok) throw new Error(`Kamera menjawab HTTP ${response.status}`);
+  const status = await response.json();
+  if (status.device_code && status.device_code !== state.activeDevice?.device_code) {
+    throw new Error('Alamat IP kini digunakan oleh peranti lain.');
+  }
+  return status;
+}
+
+function scheduleStreamRetry() {
+  clearTimeout(state.streamRetryTimer);
+  state.streamRetryTimer = null;
+  if (!state.autoStreamEnabled || !state.activeDevice || document.hidden) return;
+  state.streamRetryTimer = setTimeout(() => {
+    state.streamRetryTimer = null;
+    startStream({ automatic: true });
+  }, STREAM_RETRY_MS);
+}
+
+function startFrameFallback(generation) {
+  clearTimeout(state.streamFrameTimer);
+  let failures = 0;
+  const loadFrame = () => {
+    if (generation !== state.streamGeneration || !state.streamActive) return;
+    if (document.hidden) {
+      state.streamFrameTimer = setTimeout(loadFrame, 1_000);
+      return;
+    }
+    const image = $('#liveStream');
+    image.onload = () => {
+      if (generation !== state.streamGeneration) return;
+      failures = 0;
+      image.hidden = false;
+      $('#latestStatus').textContent = 'Live automatik (mod serasi)';
+      $('#latestTime').textContent = 'LIVE';
+      state.streamFrameTimer = setTimeout(loadFrame, 650);
+    };
+    image.onerror = () => {
+      if (generation !== state.streamGeneration) return;
+      failures += 1;
+      if (failures >= 3) {
+        stopStream({ manual: false });
+        $('#latestStatus').textContent = 'Kamera terputus; sambungan semula dijadualkan';
+        scheduleStreamRetry();
+        return;
+      }
+      state.streamFrameTimer = setTimeout(loadFrame, 1_200);
+    };
+    image.src = `${streamUrl('/capture')}&t=${Date.now()}`;
+  };
+  loadFrame();
+}
+
+async function startStream({ automatic = false } = {}) {
+  if (state.streamActive || state.streamConnecting) return;
   const url = streamUrl();
-  if (!url) return toast('Kamera belum online atau belum selesai setup.');
+  if (!url) {
+    if (!automatic) toast('Kamera belum online atau belum selesai setup.');
+    return;
+  }
+  if (!canReachLocalCamera()) {
+    if (!automatic) toast('Live tempatan memerlukan aplikasi Android FaceGuard.');
+    return;
+  }
+
+  if (!automatic) {
+    state.autoStreamEnabled = true;
+    safeStorage.setItem('faceguard-auto-live', 'true');
+  }
+  clearTimeout(state.streamRetryTimer);
+  clearInterval(state.streamHealthTimer);
+  clearTimeout(state.streamFrameTimer);
+  state.streamRetryTimer = null;
+  state.streamHealthTimer = null;
+  state.streamFrameTimer = null;
+  state.streamConnecting = true;
+  const generation = ++state.streamGeneration;
+  renderCamera();
+  $('#toggleStreamBtn').textContent = 'Menyambung…';
+  $('#latestStatus').textContent = 'Mengesan kamera pada Wi‑Fi tempatan…';
+
+  try {
+    await probeCamera();
+    if (generation !== state.streamGeneration) return;
+  } catch (error) {
+    if (generation !== state.streamGeneration) return;
+    state.streamConnecting = false;
+    renderCamera();
+    $('#toggleStreamBtn').textContent = 'Cuba live semula';
+    $('#latestStatus').textContent = 'Kamera tidak dapat dicapai pada IP tempatan';
+    if (!automatic) toast(`${error.message} Pastikan telefon dan kamera pada router yang sama.`);
+    scheduleStreamRetry();
+    return;
+  }
+
   const image = $('#liveStream');
   image.onload = () => {
+    if (generation !== state.streamGeneration) return;
+    clearTimeout(state.streamFrameTimer);
+    state.streamFrameTimer = null;
     state.streamActive = true;
+    state.streamConnecting = false;
     image.hidden = false;
     $('#latestImage').hidden = true;
     $('#cameraEmpty').hidden = true;
@@ -449,31 +598,70 @@ function startStream() {
     $('#latestTime').textContent = 'LIVE';
   };
   image.onerror = () => {
-    stopStream();
-    toast('Live stream gagal. Pastikan telefon menggunakan Wi‑Fi yang sama.');
+    if (generation !== state.streamGeneration) return;
+    startFrameFallback(generation);
   };
+
+  // MJPEG tidak menjamin acara `load`; paparkan sebaik sahaja /status berjaya.
+  state.streamActive = true;
+  state.streamConnecting = false;
+  image.hidden = false;
+  $('#latestImage').hidden = true;
+  $('#cameraEmpty').hidden = true;
+  $('#toggleStreamBtn').textContent = 'Hentikan live';
+  $('#liveBadge').className = 'live-badge online';
+  $('#liveBadge').textContent = 'LIVE';
+  $('#latestStatus').textContent = 'Siaran langsung automatik';
+  $('#latestTime').textContent = 'LIVE';
   image.src = `${url}&t=${Date.now()}`;
+  state.streamFrameTimer = setTimeout(() => {
+    if (generation === state.streamGeneration && state.streamActive) startFrameFallback(generation);
+  }, 3_500);
+
+  state.streamHealthTimer = setInterval(async () => {
+    if (generation !== state.streamGeneration || document.hidden) return;
+    try {
+      await probeCamera();
+    } catch {
+      if (generation !== state.streamGeneration) return;
+      stopStream({ manual: false });
+      $('#latestStatus').textContent = 'Kamera terputus; cuba menyambung semula…';
+      scheduleStreamRetry();
+    }
+  }, STREAM_HEALTH_MS);
 }
 
-function stopStream() {
+function stopStream({ manual = false } = {}) {
+  state.streamGeneration += 1;
+  clearTimeout(state.streamRetryTimer);
+  clearInterval(state.streamHealthTimer);
+  clearTimeout(state.streamFrameTimer);
+  state.streamRetryTimer = null;
+  state.streamHealthTimer = null;
+  state.streamFrameTimer = null;
+  state.streamConnecting = false;
   state.streamActive = false;
+  if (manual) {
+    state.autoStreamEnabled = false;
+    safeStorage.setItem('faceguard-auto-live', 'false');
+  }
   const image = $('#liveStream');
   image.onload = null;
   image.onerror = null;
   image.src = '';
   image.hidden = true;
-  $('#toggleStreamBtn').textContent = 'Mulakan live';
+  $('#toggleStreamBtn').textContent = manual ? 'Mulakan live' : 'Live automatik';
   renderCamera();
 }
 
 async function requestSnapshot() {
-  const url = streamUrl('/api/snapshot');
-  if (!url) return toast('Kamera belum online.');
+  if (!streamUrl('/api/snapshot')) return toast('Kamera belum online.');
   $('#snapshotBtn').disabled = true;
   try {
-    const response = await fetch(url, { cache: 'no-store' });
+    const response = await cameraFetch('/api/snapshot', 8_000);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     toast('Kamera sedang mengambil dan menyimpan gambar.');
+    setTimeout(() => loadActivities(), 3_000);
   } catch {
     toast('Gagal menghubungi kamera. Semak Wi‑Fi yang sama.');
   } finally {
@@ -885,7 +1073,10 @@ $('#restartSetupBtn').addEventListener('click', () => {
   $('#qrStep').hidden = true;
 });
 $('#provisionModal').addEventListener('close', stopPairingPoll);
-$('#toggleStreamBtn').addEventListener('click', () => state.streamActive ? stopStream() : startStream());
+$('#toggleStreamBtn').addEventListener('click', () => {
+  if (state.streamActive || state.streamConnecting) stopStream({ manual: true });
+  else startStream({ automatic: false });
+});
 $('#snapshotBtn').addEventListener('click', requestSnapshot);
 $('#notifyBtn').addEventListener('click', requestNotifications);
 $('#settingsNotifyBtn').addEventListener('click', requestNotifications);
@@ -921,6 +1112,12 @@ $('#checkUpdateBtn').addEventListener('click', handleUpdateButton);
 $('#signOutBtn').addEventListener('click', () => supabase.auth.signOut());
 window.addEventListener('online', () => loadDevices(state.activeDevice?.id));
 window.addEventListener('offline', () => setConnection('CHANNEL_ERROR'));
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  if (state.autoStreamEnabled && !state.streamActive && !state.streamConnecting && streamUrl()) {
+    startStream({ automatic: true });
+  }
+});
 if ('serviceWorker' in navigator && !Capacitor.isNativePlatform()) window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js'));
 if (/iphone|ipad|ipod/i.test(navigator.userAgent)) $('#iosHelp').hidden = false;
 if (Capacitor.getPlatform() === 'android') App.addListener('backButton', handleNativeBackButton);
@@ -930,7 +1127,8 @@ supabase.auth.onAuthStateChange((event, session) => {
   renderAuth();
   if (session && ['INITIAL_SESSION', 'SIGNED_IN'].includes(event)) initializeSignedInApp();
   if (!session && event === 'SIGNED_OUT') {
-    stopStream();
+    stopStream({ manual: false });
+    stopActivityPolling();
     stopPairingPoll();
     if (state.channel) supabase.removeChannel(state.channel);
     state.devices = [];
