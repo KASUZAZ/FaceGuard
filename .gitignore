@@ -1,5 +1,11 @@
 node_modules/
 dist/
-FaceGuard_Esp32/
+FaceGuard_Esp32/secrets.h
+FaceGuard_Esp32/.git/
+android/.gradle/
+android/app/build/
+android/build/
+*.jks
+*.keystore
 *.tar.gz
 .DS_Store
