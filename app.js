@@ -1,32 +1,105 @@
 import { createClient } from '@supabase/supabase-js';
+import QRCode from 'qrcode';
+import jsQR from 'jsqr';
+import { Capacitor } from '@capacitor/core';
+import { Browser } from '@capacitor/browser';
+import { App } from '@capacitor/app';
 
 const SUPABASE_URL = 'https://rerhdlfuiemsuzygjzqx.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_e-BT7oYj2e5sl07riD-kgQ_MLRUiaT6';
+const APP_VERSION = '2.2.0';
+const APP_VERSION_CODE = 7;
+const ONLINE_WINDOW_MS = 120_000;
+const STREAM_RETRY_MS = 7_000;
+const STREAM_HEALTH_MS = 12_000;
+const ACTIVITY_POLL_MS = 20_000;
+
+const memoryStorage = new Map();
+const safeStorage = {
+  getItem(key) {
+    try {
+      return window.localStorage.getItem(key);
+    } catch {
+      return memoryStorage.get(key) ?? null;
+    }
+  },
+  setItem(key, value) {
+    const stringValue = String(value);
+    memoryStorage.set(key, stringValue);
+    try {
+      window.localStorage.setItem(key, stringValue);
+    } catch {
+      // Some Android WebViews can temporarily deny storage during startup.
+    }
+  },
+  removeItem(key) {
+    memoryStorage.delete(key);
+    try {
+      window.localStorage.removeItem(key);
+    } catch {
+      // Keep the in-memory fallback usable when persistent storage is unavailable.
+    }
+  },
+};
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
-  auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, storage: safeStorage },
 });
 
 const $ = (selector) => document.querySelector(selector);
-const state = { rows: [], filter: 'all', unread: 0, installPrompt: null, channel: null };
+const state = {
+  authMode: 'signin',
+  session: null,
+  devices: [],
+  memberships: new Map(),
+  activeDevice: null,
+  members: [],
+  rows: [],
+  signedUrls: new Map(),
+  signedVideoUrls: new Map(),
+  filter: 'all',
+  unread: 0,
+  channel: null,
+  streamActive: false,
+  streamConnecting: false,
+  streamGeneration: 0,
+  streamRetryTimer: null,
+  streamHealthTimer: null,
+  streamFrameTimer: null,
+  autoStreamEnabled: safeStorage.getItem('faceguard-auto-live') !== 'false',
+  activityPollTimer: null,
+  pairingTimer: null,
+  toastTimer: null,
+  currentEvent: null,
+  initializePromise: null,
+  inAppAlertsEnabled: safeStorage.getItem('faceguard-in-app-alerts') === 'true',
+  lastBackPress: 0,
+  latestRelease: null,
+  scannerStream: null,
+  scannerFrame: null,
+  lastQrScanAt: 0,
+};
+
 const statusLabels = {
   pergerakan_kamera: 'Gerakan dikesan oleh kamera',
   pergerakan_dikesan: 'Pergerakan dikesan',
+  manual_snapshot: 'Gambar diambil secara manual',
   gambar_dan_video: 'Gambar dan video tersedia',
   gambar_sahaja: 'Gambar tersedia',
-  microsd_tidak_tersedia: 'Gambar tersedia',
-  video_upload_gagal: 'Gambar tersedia · video gagal',
-  video_rakaman_gagal: 'Gambar tersedia · rakaman gagal',
 };
 
 function escapeHtml(value = '') {
-  return String(value).replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
+  return String(value).replace(/[&<>'"]/g, (character) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;',
+  })[character]);
 }
 
-function safeMediaUrl(value) {
-  try {
-    const url = new URL(value);
-    return url.protocol === 'https:' && url.hostname === 'rerhdlfuiemsuzygjzqx.supabase.co' ? url.href : '';
-  } catch { return ''; }
+function toast(message) {
+  const element = $('#toast');
+  element.textContent = message;
+  element.classList.add('show');
+  clearTimeout(state.toastTimer);
+  state.toastTimer = setTimeout(() => element.classList.remove('show'), 3200);
 }
 
 function formatDate(value, compact = false) {
@@ -37,177 +110,1031 @@ function formatDate(value, compact = false) {
     : { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date);
 }
 
-function labelFor(row) { return statusLabels[row.status] || String(row.status || 'Aktiviti kamera').replaceAll('_', ' '); }
+function labelFor(row) {
+  return statusLabels[row.status] || String(row.status || 'Aktiviti kamera').replaceAll('_', ' ');
+}
 
-function toast(message) {
-  const element = $('#toast');
-  element.textContent = message;
-  element.classList.add('show');
-  clearTimeout(state.toastTimer);
-  state.toastTimer = setTimeout(() => element.classList.remove('show'), 2800);
+function isDeviceOnline(device) {
+  return Boolean(device?.last_seen_at) && Date.now() - new Date(device.last_seen_at).getTime() < ONLINE_WINDOW_MS;
+}
+
+function roleFor(deviceId) {
+  return state.memberships.get(deviceId)?.role || 'viewer';
+}
+
+function canEditMedia() {
+  return ['owner', 'editor'].includes(roleFor(state.activeDevice?.id));
 }
 
 function setConnection(status) {
-  const badge = $('#connectionBadge');
-  const detail = $('#realtimeDetail');
-  const dot = $('#realtimeDot');
   const online = status === 'SUBSCRIBED';
-  badge.className = `status-pill ${online ? 'online' : status === 'CHANNEL_ERROR' ? 'offline' : 'connecting'}`;
-  badge.innerHTML = `<i></i>${online ? 'Realtime aktif' : status === 'CHANNEL_ERROR' ? 'Sambungan gagal' : 'Menyambung'}`;
-  detail.textContent = online ? 'Supabase Realtime sedang menerima aktiviti.' : 'Mencuba sambungan ke Supabase.';
-  dot.classList.toggle('online', online);
+  const failed = ['CHANNEL_ERROR', 'TIMED_OUT', 'CLOSED'].includes(status);
+  $('#connectionBadge').className = `status-pill ${online ? 'online' : failed ? 'offline' : 'connecting'}`;
+  $('#connectionBadge').innerHTML = `<i></i>${online ? 'Realtime aktif' : failed ? 'Sambungan gagal' : 'Menyambung'}`;
+  $('#realtimeDetail').textContent = online ? 'Aktiviti baharu diterima secara masa nyata.' : 'Mencuba sambungan ke Supabase.';
+  $('#realtimeDot').classList.toggle('online', online);
 }
 
-function renderLatest() {
-  const row = state.rows.find((item) => safeMediaUrl(item.image_url));
-  const image = $('#latestImage');
-  const empty = $('#cameraEmpty');
-  if (!row) {
-    image.hidden = true;
-    empty.hidden = false;
-    $('#latestStatus').textContent = 'Menunggu kamera';
-    $('#latestTime').textContent = '—';
+async function invokeFaceGuard(action, body = {}) {
+  const { data, error } = await supabase.functions.invoke('faceguard-device', {
+    body: { action, ...body },
+    headers: { 'X-FaceGuard-Action': action },
+  });
+  if (error) throw new Error(data?.error || error.message || 'Permintaan FaceGuard gagal.');
+  if (data?.error) throw new Error(data.error);
+  return data;
+}
+
+function renderAuth() {
+  const signedIn = Boolean(state.session?.user);
+  $('#authScreen').hidden = signedIn;
+  $('#appShell').hidden = !signedIn;
+  if (signedIn) $('#accountEmail').textContent = state.session.user.email || 'Akaun FaceGuard';
+}
+
+async function handleAuthSubmit(event) {
+  event.preventDefault();
+  const email = $('#authEmail').value.trim();
+  const password = $('#authPassword').value;
+  $('#authSubmit').disabled = true;
+  $('#authMessage').textContent = 'Sila tunggu…';
+  try {
+    if (state.authMode === 'signup') {
+      const { data, error } = await supabase.auth.signUp({ email, password });
+      if (error) throw error;
+      $('#authMessage').textContent = data.session
+        ? 'Akaun berjaya dicipta.'
+        : 'Akaun dicipta. Semak e-mel pengesahan sebelum log masuk.';
+    } else {
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) throw error;
+      $('#authMessage').textContent = '';
+    }
+  } catch (error) {
+    $('#authMessage').textContent = error.message;
+  } finally {
+    $('#authSubmit').disabled = false;
+  }
+}
+
+function setAuthMode(mode) {
+  state.authMode = mode;
+  document.querySelectorAll('.auth-tab').forEach((button) => button.classList.toggle('active', button.dataset.authMode === mode));
+  $('#authSubmit').textContent = mode === 'signup' ? 'Daftar akaun' : 'Log masuk';
+  $('#authPassword').autocomplete = mode === 'signup' ? 'new-password' : 'current-password';
+  $('#authMessage').textContent = '';
+}
+
+async function signedMediaUrl(row) {
+  if (!row) return '';
+  if (state.signedUrls.has(row.id)) return state.signedUrls.get(row.id);
+  if (row.storage_path) {
+    const { data, error } = await supabase.storage.from('faceguard-storage').createSignedUrl(row.storage_path, 3600);
+    if (!error && data?.signedUrl) {
+      state.signedUrls.set(row.id, data.signedUrl);
+      return data.signedUrl;
+    }
+  }
+  try {
+    const url = new URL(row.image_url || '');
+    if (url.protocol === 'https:' && url.hostname === 'rerhdlfuiemsuzygjzqx.supabase.co') {
+      state.signedUrls.set(row.id, url.href);
+      return url.href;
+    }
+  } catch { /* URL tidak sah */ }
+  return '';
+}
+
+function storagePathFromPublicUrl(value = '') {
+  try {
+    const url = new URL(value);
+    const marker = '/storage/v1/object/public/faceguard-storage/';
+    const index = url.pathname.indexOf(marker);
+    return index >= 0 ? decodeURIComponent(url.pathname.slice(index + marker.length)) : '';
+  } catch {
+    return '';
+  }
+}
+
+async function signedVideoUrl(row) {
+  if (!row || state.signedVideoUrls.has(row.id)) return state.signedVideoUrls.get(row?.id) || '';
+  const clipPath = Array.isArray(row.clip_paths) ? row.clip_paths[0] : '';
+  const storagePath = clipPath || storagePathFromPublicUrl(row.video_url);
+  if (storagePath) {
+    const { data, error } = await supabase.storage.from('faceguard-storage').createSignedUrl(storagePath, 3600);
+    if (!error && data?.signedUrl) {
+      state.signedVideoUrls.set(row.id, data.signedUrl);
+      return data.signedUrl;
+    }
+  }
+  try {
+    const url = new URL(row.video_url || '');
+    if (url.protocol === 'https:' && url.hostname !== 'rerhdlfuiemsuzygjzqx.supabase.co') {
+      state.signedVideoUrls.set(row.id, url.href);
+      return url.href;
+    }
+  } catch { /* URL tidak sah */ }
+  return '';
+}
+
+async function hydrateMedia(rows) {
+  await Promise.all(rows.flatMap((row) => [signedMediaUrl(row), signedVideoUrl(row)]));
+  return rows;
+}
+
+async function loadDevices(preferredDeviceId = null) {
+  const userId = state.session?.user?.id;
+  if (!userId) return;
+  const [devicesResult, membershipsResult] = await Promise.all([
+    supabase.from('faceguard_devices').select('id,device_code,name,local_ip,stream_token,last_seen_at,firmware_version,owner_id,created_at').order('created_at'),
+    supabase.from('faceguard_device_members').select('device_id,user_id,role,created_at').eq('user_id', userId),
+  ]);
+  if (devicesResult.error) throw devicesResult.error;
+  if (membershipsResult.error) throw membershipsResult.error;
+  state.devices = devicesResult.data || [];
+  state.memberships = new Map((membershipsResult.data || []).map((membership) => [membership.device_id, membership]));
+
+  const saved = preferredDeviceId || safeStorage.getItem('faceguard-active-device');
+  state.activeDevice = state.devices.find((device) => device.id === saved) || state.devices[0] || null;
+  if (state.activeDevice) safeStorage.setItem('faceguard-active-device', state.activeDevice.id);
+  renderDeviceChooser();
+  renderDeviceList();
+  await selectActiveDevice();
+}
+
+function renderDeviceChooser() {
+  $('#deviceSelect').innerHTML = state.devices.length
+    ? state.devices.map((device) => `<option value="${device.id}" ${device.id === state.activeDevice?.id ? 'selected' : ''}>${escapeHtml(device.name)}</option>`).join('')
+    : '<option value="">Tiada kamera</option>';
+  $('#deviceTotal').textContent = `${state.devices.length} kamera`;
+}
+
+function renderDeviceList() {
+  $('#deviceList').innerHTML = state.devices.length ? state.devices.map((device) => {
+    const online = isDeviceOnline(device);
+    return `<button class="device-item ${device.id === state.activeDevice?.id ? 'selected' : ''}" data-device-id="${device.id}">
+      <span class="device-icon">◉</span>
+      <span><b>${escapeHtml(device.name)}</b><small>${escapeHtml(device.device_code)} · ${escapeHtml(roleFor(device.id))}</small></span>
+      <i class="${online ? 'online' : ''}"></i><em>${online ? 'Online' : 'Offline'}</em>
+    </button>`;
+  }).join('') : '<div class="empty-state">Belum ada kamera. Tekan butang setup untuk bermula.</div>';
+}
+
+async function selectActiveDevice() {
+  stopStream({ manual: false });
+  stopActivityPolling();
+  state.rows = [];
+  state.signedUrls.clear();
+  state.signedVideoUrls.clear();
+  renderCamera();
+  renderEvents();
+  if (!state.activeDevice) {
+    state.members = [];
+    renderMembers();
+    if (state.channel) await supabase.removeChannel(state.channel);
     return;
   }
-  image.src = safeMediaUrl(row.image_url);
-  image.hidden = false;
-  empty.hidden = true;
-  $('#latestStatus').textContent = labelFor(row);
-  $('#latestTime').textContent = formatDate(row.created_at);
+  await Promise.all([loadActivities(), loadMembers()]);
+  subscribeRealtime();
+  startActivityPolling();
+  renderCamera();
+  renderDeviceList();
+  if (state.autoStreamEnabled && streamUrl()) {
+    startStream({ automatic: true });
+  }
+}
+
+function stopActivityPolling() {
+  clearInterval(state.activityPollTimer);
+  state.activityPollTimer = null;
+}
+
+function startActivityPolling() {
+  stopActivityPolling();
+  if (!state.activeDevice) return;
+  state.activityPollTimer = setInterval(() => {
+    if (!document.hidden && state.activeDevice) loadActivities().catch(console.warn);
+  }, ACTIVITY_POLL_MS);
+}
+
+async function loadActivities(showToast = false) {
+  if (!state.activeDevice) return;
+  const { data, error } = await supabase
+    .from('aktiviti_log')
+    .select('id,created_at,device_id,image_url,storage_path,status,video_url,clip_paths,event_kind')
+    .eq('device_id', state.activeDevice.id)
+    .order('created_at', { ascending: false })
+    .limit(100);
+  if (error) {
+    $('#eventList').innerHTML = `<div class="empty-state error">Aktiviti gagal dimuatkan.<br>${escapeHtml(error.message)}</div>`;
+    return;
+  }
+  state.rows = await hydrateMedia(data || []);
+  renderCamera();
+  renderEvents();
+  if (showToast) toast('Data kamera dikemas kini');
+}
+
+async function loadMembers() {
+  if (!state.activeDevice) return;
+  try {
+    const data = await invokeFaceGuard('list_members', { device_id: state.activeDevice.id });
+    state.members = data.members || [];
+  } catch (error) {
+    state.members = [];
+    toast(error.message);
+  }
+  renderMembers();
+}
+
+function renderCamera() {
+  const device = state.activeDevice;
+  const latest = state.rows.find((row) => state.signedUrls.get(row.id));
+  $('#cameraHeading').textContent = device?.name || 'Tambah kamera dahulu';
+  $('#deviceCode').textContent = device?.device_code || 'ESP32-CAM';
+  $('#networkMetric').textContent = device?.local_ip || '—';
+  $('#eventTotal').textContent = String(state.rows.length);
+  $('#memberMetric').textContent = `${state.members.length} / 5`;
+  $('#liveBadge').className = `live-badge ${state.streamActive || isDeviceOnline(device) ? 'online' : 'offline'}`;
+  $('#liveBadge').textContent = state.streamConnecting ? 'CONNECTING' : state.streamActive ? 'LIVE' : isDeviceOnline(device) ? 'ONLINE' : 'OFFLINE';
+
+  const latestImage = $('#latestImage');
+  const empty = $('#cameraEmpty');
+  if (!state.streamActive && latest) {
+    latestImage.src = state.signedUrls.get(latest.id);
+    latestImage.hidden = false;
+    empty.hidden = true;
+    $('#latestStatus').textContent = labelFor(latest);
+    $('#latestTime').textContent = formatDate(latest.created_at);
+  } else if (!state.streamActive) {
+    latestImage.hidden = true;
+    empty.hidden = false;
+    empty.querySelector('b').textContent = device ? 'Belum ada rakaman gerakan' : 'Belum ada kamera';
+    empty.querySelector('span').textContent = device ? 'Mulakan live atau lalu di hadapan kamera.' : 'Tekan “＋ Kamera” untuk setup Wi‑Fi.';
+    $('#latestStatus').textContent = device ? 'Menunggu aktiviti' : 'Menunggu kamera';
+    $('#latestTime').textContent = '—';
+  }
+  $('#lastSync').textContent = `Dikemas kini ${new Intl.DateTimeFormat('ms-MY', { hour: '2-digit', minute: '2-digit' }).format(new Date())}`;
 }
 
 function filteredRows() {
-  if (state.filter === 'video') return state.rows.filter((row) => safeMediaUrl(row.video_url));
-  if (state.filter === 'image') return state.rows.filter((row) => safeMediaUrl(row.image_url));
+  if (state.filter === 'video') return state.rows.filter((row) => row.video_url || (Array.isArray(row.clip_paths) && row.clip_paths.length));
+  if (state.filter === 'image') return state.rows.filter((row) => state.signedUrls.get(row.id));
   return state.rows;
 }
 
 function renderEvents() {
   const rows = filteredRows();
-  $('#eventTotal').textContent = `${state.rows.length} event`;
-  $('#eventList').innerHTML = rows.length ? rows.map((row) => {
-    const image = safeMediaUrl(row.image_url);
-    const video = safeMediaUrl(row.video_url);
-    return `<article class="event-item" data-row-id="${Number(row.id)}">
-      <div class="event-thumb">${image ? `<img src="${image}" alt="">` : '<span>◉</span>'}</div>
-      <div class="event-copy"><b>${escapeHtml(labelFor(row))}</b><small>${escapeHtml(formatDate(row.created_at))}</small><span>${video ? 'Gambar + video AVI' : 'Gambar ESP32-CAM'}</span></div>
-      <button aria-label="Buka aktiviti">›</button>
-    </article>`;
-  }).join('') : '<div class="empty-state">Tiada aktiviti untuk penapis ini.</div>';
-}
-
-function mediaItems() {
-  return state.rows.flatMap((row) => {
-    const items = [];
-    const image = safeMediaUrl(row.image_url);
-    const video = safeMediaUrl(row.video_url);
-    if (image) items.push({ row, url: image, type: 'image' });
-    if (video) items.push({ row, url: video, type: 'video' });
-    return items;
-  });
-}
-
-function renderGallery() {
-  const items = mediaItems();
-  $('#mediaTotal').textContent = `${items.length} media`;
-  $('#galleryGrid').innerHTML = items.length ? items.map((item, index) => `<article class="gallery-item">
-    <button data-media-index="${index}">${item.type === 'image' ? `<img src="${item.url}" alt="Bukti gerakan">` : '<div class="avi-tile"><span>▶</span><b>AVI</b></div>'}<i>${item.type === 'image' ? 'GAMBAR' : 'VIDEO'}</i></button>
-    <div><b>${escapeHtml(labelFor(item.row))}</b><small>${escapeHtml(formatDate(item.row.created_at, true))}</small></div>
-  </article>`).join('') : '<div class="empty-state">Belum ada media.</div>';
-}
-
-function updateUnread() {
   $('#unreadBadge').textContent = `${state.unread} baharu`;
-  $('#navBadge').textContent = state.unread;
+  $('#navBadge').textContent = String(state.unread);
   $('#navBadge').hidden = state.unread === 0;
-}
-
-function renderAll() {
-  renderLatest(); renderEvents(); renderGallery(); updateUnread();
-  $('#lastSync').textContent = `Dikemas kini ${new Intl.DateTimeFormat('ms-MY', { hour: '2-digit', minute: '2-digit' }).format(new Date())}`;
-}
-
-async function loadActivities(showToast = false) {
-  const { data, error } = await supabase.from('aktiviti_log').select('id,created_at,image_url,status,video_url').order('created_at', { ascending: false }).limit(100);
-  if (error) {
-    $('#eventList').innerHTML = `<div class="empty-state error">Data gagal dimuatkan.<br>${escapeHtml(error.message)}</div>`;
-    setConnection('CHANNEL_ERROR');
+  if (!state.activeDevice) {
+    $('#eventList').innerHTML = '<div class="empty-state">Pilih atau tambah kamera dahulu.</div>';
     return;
   }
-  state.rows = data || [];
-  renderAll();
-  if (showToast) toast('Data FaceGuard dikemas kini');
+  $('#eventList').innerHTML = rows.length ? rows.map((row) => {
+    const image = state.signedUrls.get(row.id) || '';
+    const hasVideo = Boolean(state.signedVideoUrls.get(row.id));
+    return `<article class="event-item" data-row-id="${row.id}">
+      <button class="event-open" aria-label="Buka aktiviti">
+        <span class="event-thumb">${image ? `<img src="${escapeHtml(image)}" alt="">` : '<i>◉</i>'}</span>
+        <span class="event-copy"><b>${escapeHtml(labelFor(row))}</b><small>${escapeHtml(formatDate(row.created_at))}</small><em>${hasVideo ? 'Klip + gambar' : 'Gambar ESP32-CAM'}</em></span>
+        <span class="event-chevron">›</span>
+      </button>
+      ${canEditMedia() ? `<button class="event-delete" data-delete-row="${row.id}" aria-label="Padam aktiviti">Padam</button>` : ''}
+    </article>`;
+  }).join('') : `<div class="empty-state">${state.filter === 'video' ? 'Tiada klip video. Live stream masih boleh digunakan.' : 'Belum ada aktiviti gerakan.'}</div>`;
 }
 
-function showNotification(row) {
-  if (!('Notification' in window) || Notification.permission !== 'granted' || document.visibilityState === 'visible') return;
-  new Notification('FaceGuard: gerakan dikesan', { body: labelFor(row), icon: '/icon.svg', tag: `faceguard-${row.id}` });
+function renderMembers() {
+  $('#memberMetric').textContent = `${state.members.length} / 5`;
+  if (!state.activeDevice) {
+    $('#memberList').innerHTML = '<div class="empty-state compact">Pilih kamera dahulu.</div>';
+    $('#createInviteBtn').disabled = true;
+    return;
+  }
+  const isOwner = roleFor(state.activeDevice.id) === 'owner';
+  $('#createInviteBtn').disabled = !isOwner || state.members.length >= 5;
+  $('#memberList').innerHTML = state.members.length ? state.members.map((member) => `<article class="member-item">
+    <span>${escapeHtml((member.email || '?').slice(0, 1).toUpperCase())}</span>
+    <div><b>${escapeHtml(member.email || 'Pengguna FaceGuard')}</b><small>${escapeHtml(member.role)}</small></div>
+    ${isOwner && member.role !== 'owner' ? `<button data-remove-member="${member.user_id}">Buang</button>` : '<i>✓</i>'}
+  </article>`).join('') : '<div class="empty-state compact">Maklumat pengguna tidak tersedia.</div>';
 }
 
-function subscribeRealtime() {
-  state.channel = supabase.channel('faceguard-activity')
-    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'aktiviti_log' }, ({ new: row }) => {
+async function subscribeRealtime() {
+  if (state.channel) await supabase.removeChannel(state.channel);
+  if (!state.activeDevice) return;
+  const deviceId = state.activeDevice.id;
+  state.channel = supabase
+    .channel(`faceguard-${deviceId}-${Date.now()}`)
+    .on('postgres_changes', {
+      event: 'INSERT', schema: 'public', table: 'aktiviti_log', filter: `device_id=eq.${deviceId}`,
+    }, async ({ new: row }) => {
       if (state.rows.some((item) => item.id === row.id)) return;
+      await signedMediaUrl(row);
+      await signedVideoUrl(row);
       state.rows.unshift(row);
       state.rows = state.rows.slice(0, 100);
       state.unread += 1;
-      renderAll();
-      showNotification(row);
+      renderCamera();
+      renderEvents();
+      await showMotionNotification(row);
       toast('Gerakan baharu dikesan');
+    })
+    .on('postgres_changes', {
+      event: 'UPDATE', schema: 'public', table: 'faceguard_devices', filter: `id=eq.${deviceId}`,
+    }, ({ new: device }) => {
+      const index = state.devices.findIndex((item) => item.id === device.id);
+      if (index < 0) return;
+      const previousIp = state.devices[index].local_ip;
+      state.devices[index] = { ...state.devices[index], ...device };
+      state.activeDevice = state.devices[index];
+      renderCamera();
+      renderDeviceList();
+      if (previousIp !== device.local_ip && (state.streamActive || state.streamConnecting)) {
+        stopStream({ manual: false });
+      }
+      if (state.autoStreamEnabled && !state.streamActive && !state.streamConnecting && streamUrl()) {
+        startStream({ automatic: true });
+      }
     })
     .subscribe((status) => setConnection(status));
 }
 
+function streamUrl(path = '/stream') {
+  const device = state.activeDevice;
+  if (!device?.local_ip || !device?.stream_token) return '';
+  const port = path === '/stream' ? ':81' : '';
+  return `http://${device.local_ip}${port}${path}?token=${encodeURIComponent(device.stream_token)}`;
+}
+
+function canReachLocalCamera() {
+  return Capacitor.isNativePlatform() || ['http:', 'file:'].includes(window.location.protocol);
+}
+
+async function cameraFetch(path, timeoutMs = 6_000) {
+  const url = streamUrl(path);
+  if (!url) throw new Error('Kamera belum online atau belum selesai setup.');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { cache: 'no-store', signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function probeCamera() {
+  const response = await cameraFetch('/status', 4_500);
+  if (!response.ok) throw new Error(`Kamera menjawab HTTP ${response.status}`);
+  const status = await response.json();
+  if (status.device_code && status.device_code !== state.activeDevice?.device_code) {
+    throw new Error('Alamat IP kini digunakan oleh peranti lain.');
+  }
+  return status;
+}
+
+function scheduleStreamRetry() {
+  clearTimeout(state.streamRetryTimer);
+  state.streamRetryTimer = null;
+  if (!state.autoStreamEnabled || !state.activeDevice || document.hidden) return;
+  state.streamRetryTimer = setTimeout(() => {
+    state.streamRetryTimer = null;
+    startStream({ automatic: true });
+  }, STREAM_RETRY_MS);
+}
+
+function startFrameFallback(generation) {
+  clearTimeout(state.streamFrameTimer);
+  let failures = 0;
+  const loadFrame = () => {
+    if (generation !== state.streamGeneration || !state.streamActive) return;
+    if (document.hidden) {
+      state.streamFrameTimer = setTimeout(loadFrame, 1_000);
+      return;
+    }
+    const image = $('#liveStream');
+    image.onload = () => {
+      if (generation !== state.streamGeneration) return;
+      failures = 0;
+      image.hidden = false;
+      $('#latestStatus').textContent = 'Live automatik (mod serasi)';
+      $('#latestTime').textContent = 'LIVE';
+      state.streamFrameTimer = setTimeout(loadFrame, 650);
+    };
+    image.onerror = () => {
+      if (generation !== state.streamGeneration) return;
+      failures += 1;
+      if (failures >= 3) {
+        stopStream({ manual: false });
+        $('#latestStatus').textContent = 'Kamera terputus; sambungan semula dijadualkan';
+        scheduleStreamRetry();
+        return;
+      }
+      state.streamFrameTimer = setTimeout(loadFrame, 1_200);
+    };
+    image.src = `${streamUrl('/capture')}&t=${Date.now()}`;
+  };
+  loadFrame();
+}
+
+async function startStream({ automatic = false } = {}) {
+  if (state.streamActive || state.streamConnecting) return;
+  const url = streamUrl();
+  if (!url) {
+    if (!automatic) toast('Kamera belum online atau belum selesai setup.');
+    return;
+  }
+  if (!canReachLocalCamera()) {
+    if (!automatic) toast('Live tempatan memerlukan aplikasi Android FaceGuard.');
+    return;
+  }
+
+  if (!automatic) {
+    state.autoStreamEnabled = true;
+    safeStorage.setItem('faceguard-auto-live', 'true');
+  }
+  clearTimeout(state.streamRetryTimer);
+  clearInterval(state.streamHealthTimer);
+  clearTimeout(state.streamFrameTimer);
+  state.streamRetryTimer = null;
+  state.streamHealthTimer = null;
+  state.streamFrameTimer = null;
+  state.streamConnecting = true;
+  const generation = ++state.streamGeneration;
+  renderCamera();
+  $('#toggleStreamBtn').textContent = 'Menyambung…';
+  $('#latestStatus').textContent = 'Mengesan kamera pada Wi‑Fi tempatan…';
+
+  try {
+    await probeCamera();
+    if (generation !== state.streamGeneration) return;
+  } catch (error) {
+    if (generation !== state.streamGeneration) return;
+    state.streamConnecting = false;
+    renderCamera();
+    $('#toggleStreamBtn').textContent = 'Cuba live semula';
+    $('#latestStatus').textContent = 'Kamera tidak dapat dicapai pada IP tempatan';
+    if (!automatic) toast(`${error.message} Pastikan telefon dan kamera pada router yang sama.`);
+    scheduleStreamRetry();
+    return;
+  }
+
+  const image = $('#liveStream');
+  image.onload = () => {
+    if (generation !== state.streamGeneration) return;
+    clearTimeout(state.streamFrameTimer);
+    state.streamFrameTimer = null;
+    state.streamActive = true;
+    state.streamConnecting = false;
+    image.hidden = false;
+    $('#latestImage').hidden = true;
+    $('#cameraEmpty').hidden = true;
+    $('#toggleStreamBtn').textContent = 'Hentikan live';
+    $('#liveBadge').className = 'live-badge online';
+    $('#liveBadge').textContent = 'LIVE';
+    $('#latestStatus').textContent = 'Siaran langsung Wi‑Fi tempatan';
+    $('#latestTime').textContent = 'LIVE';
+  };
+  image.onerror = () => {
+    if (generation !== state.streamGeneration) return;
+    startFrameFallback(generation);
+  };
+
+  // MJPEG tidak menjamin acara `load`; paparkan sebaik sahaja /status berjaya.
+  state.streamActive = true;
+  state.streamConnecting = false;
+  image.hidden = false;
+  $('#latestImage').hidden = true;
+  $('#cameraEmpty').hidden = true;
+  $('#toggleStreamBtn').textContent = 'Hentikan live';
+  $('#liveBadge').className = 'live-badge online';
+  $('#liveBadge').textContent = 'LIVE';
+  $('#latestStatus').textContent = 'Siaran langsung automatik';
+  $('#latestTime').textContent = 'LIVE';
+  image.src = `${url}&t=${Date.now()}`;
+  state.streamFrameTimer = setTimeout(() => {
+    if (generation === state.streamGeneration && state.streamActive) startFrameFallback(generation);
+  }, 3_500);
+
+  state.streamHealthTimer = setInterval(async () => {
+    if (generation !== state.streamGeneration || document.hidden) return;
+    try {
+      await probeCamera();
+    } catch {
+      if (generation !== state.streamGeneration) return;
+      stopStream({ manual: false });
+      $('#latestStatus').textContent = 'Kamera terputus; cuba menyambung semula…';
+      scheduleStreamRetry();
+    }
+  }, STREAM_HEALTH_MS);
+}
+
+function stopStream({ manual = false } = {}) {
+  state.streamGeneration += 1;
+  clearTimeout(state.streamRetryTimer);
+  clearInterval(state.streamHealthTimer);
+  clearTimeout(state.streamFrameTimer);
+  state.streamRetryTimer = null;
+  state.streamHealthTimer = null;
+  state.streamFrameTimer = null;
+  state.streamConnecting = false;
+  state.streamActive = false;
+  if (manual) {
+    state.autoStreamEnabled = false;
+    safeStorage.setItem('faceguard-auto-live', 'false');
+  }
+  const image = $('#liveStream');
+  image.onload = null;
+  image.onerror = null;
+  image.src = '';
+  image.hidden = true;
+  $('#toggleStreamBtn').textContent = manual ? 'Mulakan live' : 'Live automatik';
+  renderCamera();
+}
+
+async function requestSnapshot() {
+  if (!streamUrl('/api/snapshot')) return toast('Kamera belum online.');
+  $('#snapshotBtn').disabled = true;
+  try {
+    const response = await cameraFetch('/api/snapshot', 8_000);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    toast('Kamera sedang mengambil dan menyimpan gambar.');
+    setTimeout(() => loadActivities(), 3_000);
+  } catch {
+    toast('Gagal menghubungi kamera. Semak Wi‑Fi yang sama.');
+  } finally {
+    $('#snapshotBtn').disabled = false;
+  }
+}
+
 async function requestNotifications() {
-  if (!('Notification' in window)) return toast('Notifikasi tidak disokong pada pelayar ini');
+  if (Capacitor.isNativePlatform()) {
+    state.inAppAlertsEnabled = true;
+    safeStorage.setItem('faceguard-in-app-alerts', 'true');
+    $('#notificationStatus').textContent = 'Alert dalam aplikasi aktif';
+    toast('Alert FaceGuard diaktifkan');
+    return;
+  }
+  if (!('Notification' in window)) return toast('Notifikasi tidak disokong pada pelayar ini.');
   const permission = await Notification.requestPermission();
-  toast(permission === 'granted' ? 'Notifikasi FaceGuard diaktifkan' : 'Kebenaran notifikasi tidak diberikan');
+  $('#notificationStatus').textContent = permission === 'granted' ? 'Notifikasi web aktif' : 'Kebenaran ditolak';
+  toast(permission === 'granted' ? 'Notifikasi web diaktifkan' : 'Kebenaran notifikasi tidak diberikan');
+}
+
+async function showMotionNotification(row) {
+  const title = 'FaceGuard: gerakan dikesan';
+  const body = `${state.activeDevice?.name || 'Kamera'} · ${labelFor(row)}`;
+  if (Capacitor.isNativePlatform()) {
+    if (state.inAppAlertsEnabled && navigator.vibrate) navigator.vibrate([180, 100, 180]);
+  } else if ('Notification' in window && Notification.permission === 'granted') {
+    new Notification(title, { body, icon: '/icon.svg', tag: `faceguard-${row.id}` });
+  }
+}
+
+function decodeWifiQrValue(value = '') {
+  return value.replace(/\\([\\;,:\"])/g, '$1');
+}
+
+function parseScannedWifiQr(rawValue = '') {
+  const value = String(rawValue).trim();
+  if (value.startsWith('FG1\n')) {
+    const parts = value.split('\n');
+    if (parts.length >= 4 && parts[2]) {
+      return { ssid: parts[2], password: parts.slice(3).join('\n') };
+    }
+  }
+  if (!value.toUpperCase().startsWith('WIFI:')) return null;
+  const fields = {};
+  const pattern = /([A-Z]):((?:\\.|[^;])*);/gi;
+  let match;
+  while ((match = pattern.exec(value.slice(5)))) {
+    fields[match[1].toUpperCase()] = decodeWifiQrValue(match[2]);
+  }
+  if (!fields.S) return null;
+  return { ssid: fields.S, password: fields.P || '' };
+}
+
+function stopQrScanner(closeDialog = false) {
+  if (state.scannerFrame) cancelAnimationFrame(state.scannerFrame);
+  state.scannerFrame = null;
+  state.scannerStream?.getTracks().forEach((track) => track.stop());
+  state.scannerStream = null;
+  const video = $('#qrScannerVideo');
+  video.pause();
+  video.srcObject = null;
+  if (closeDialog && $('#qrScannerModal').open) $('#qrScannerModal').close();
+}
+
+function acceptScannedWifiQr(value) {
+  const wifi = parseScannedWifiQr(value);
+  if (!wifi) {
+    $('#scannerStatus').textContent = 'QR dibaca, tetapi bukan QR Wi‑Fi. Cuba QR yang lain.';
+    return false;
+  }
+  $('#wifiSsid').value = wifi.ssid;
+  $('#wifiPassword').value = wifi.password;
+  stopQrScanner(true);
+  toast(`Wi‑Fi “${wifi.ssid}” berjaya diimbas`);
+  return true;
+}
+
+function scanQrVideoFrame(timestamp = 0) {
+  if (!state.scannerStream) return;
+  const video = $('#qrScannerVideo');
+  if (video.readyState >= 2 && timestamp - state.lastQrScanAt > 140) {
+    state.lastQrScanAt = timestamp;
+    const canvas = $('#qrScannerCanvas');
+    const maximumWidth = 640;
+    const scale = Math.min(1, maximumWidth / video.videoWidth);
+    canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+    canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+    const result = jsQR(pixels.data, pixels.width, pixels.height, { inversionAttempts: 'attemptBoth' });
+    if (result?.data && acceptScannedWifiQr(result.data)) return;
+  }
+  state.scannerFrame = requestAnimationFrame(scanQrVideoFrame);
+}
+
+async function startQrScanner() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    $('#scannerImageInput').click();
+    return;
+  }
+  $('#scannerStatus').textContent = 'Meminta kebenaran kamera…';
+  $('#qrScannerModal').showModal();
+  try {
+    state.scannerStream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+    });
+    const video = $('#qrScannerVideo');
+    video.srcObject = state.scannerStream;
+    await video.play();
+    $('#scannerStatus').textContent = 'Halakan kotak kepada QR Wi‑Fi';
+    state.lastQrScanAt = 0;
+    state.scannerFrame = requestAnimationFrame(scanQrVideoFrame);
+  } catch (error) {
+    stopQrScanner();
+    $('#scannerStatus').textContent = 'Kamera tidak dapat dibuka. Benarkan akses kamera atau pilih gambar QR.';
+    console.warn('QR scanner camera failed', error);
+  }
+}
+
+async function scanQrImageFile(file) {
+  if (!file) return;
+  try {
+    const bitmap = await createImageBitmap(file);
+    const canvas = $('#qrScannerCanvas');
+    const scale = Math.min(1, 1200 / bitmap.width);
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close();
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+    const result = jsQR(pixels.data, pixels.width, pixels.height, { inversionAttempts: 'attemptBoth' });
+    if (!result?.data || !acceptScannedWifiQr(result.data)) {
+      toast('QR Wi‑Fi tidak ditemui dalam gambar');
+    }
+  } catch {
+    toast('Gambar QR tidak dapat dibaca');
+  }
+}
+
+function openProvisioning() {
+  if (!state.session) return;
+  stopPairingPoll();
+  $('#wifiStep').hidden = false;
+  $('#qrStep').hidden = true;
+  $('#pairingMessage').textContent = 'Menunggu kamera mengimbas QR…';
+  $('#provisionModal').showModal();
+}
+
+async function createProvisionQr(event) {
+  event.preventDefault();
+  const ssid = $('#wifiSsid').value.trim();
+  const password = $('#wifiPassword').value;
+  const submit = event.submitter;
+  submit.disabled = true;
+  try {
+    const setup = await invokeFaceGuard('create_setup');
+    const payload = `FG1\n${setup.setup_token}\n${ssid}\n${password}`;
+    await QRCode.toCanvas($('#wifiQrCanvas'), payload, {
+      width: 290, margin: 2, errorCorrectionLevel: 'M', color: { dark: '#101418', light: '#ffffff' },
+    });
+    $('#wifiStep').hidden = true;
+    $('#qrStep').hidden = false;
+    startPairingPoll(setup.session_id);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+function startPairingPoll(sessionId) {
+  stopPairingPoll();
+  let attempts = 0;
+  state.pairingTimer = setInterval(async () => {
+    attempts += 1;
+    const { data } = await supabase
+      .from('faceguard_setup_sessions')
+      .select('claimed_device_id,expires_at')
+      .eq('id', sessionId)
+      .maybeSingle();
+    if (data?.claimed_device_id) {
+      stopPairingPoll();
+      $('#pairingMessage').textContent = 'Kamera berjaya disambungkan!';
+      $('#wifiPassword').value = '';
+      setTimeout(() => $('#provisionModal').close(), 900);
+      await loadDevices(data.claimed_device_id);
+      toast('Kamera FaceGuard berjaya ditambah');
+    } else if (!data || new Date(data.expires_at).getTime() < Date.now() || attempts > 150) {
+      stopPairingPoll();
+      $('#pairingMessage').textContent = 'Sesi tamat. Jana QR baharu dan cuba lagi.';
+    }
+  }, 2000);
+}
+
+function stopPairingPoll() {
+  if (state.pairingTimer) clearInterval(state.pairingTimer);
+  state.pairingTimer = null;
+}
+
+async function deleteEvent(row) {
+  if (!row || !canEditMedia()) return toast('Akaun ini tidak dibenarkan memadam media.');
+  if (!window.confirm('Padam gambar/klip ini daripada FaceGuard? Tindakan ini tidak boleh dibatalkan.')) return;
+  try {
+    await invokeFaceGuard('delete_event', { event_id: row.id });
+    state.rows = state.rows.filter((item) => item.id !== row.id);
+    state.signedUrls.delete(row.id);
+    state.signedVideoUrls.delete(row.id);
+    $('#mediaModal').close();
+    renderCamera();
+    renderEvents();
+    toast('Media berjaya dipadam');
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function openEvent(row) {
+  const image = state.signedUrls.get(row?.id);
+  const video = state.signedVideoUrls.get(row?.id);
+  if (!row || (!image && !video)) return toast('Media aktiviti tidak tersedia.');
+  state.currentEvent = row;
+  $('#modalImage').hidden = !image;
+  $('#modalImage').src = image || '';
+  $('#modalVideo').hidden = !video;
+  $('#modalVideo').src = video || '';
+  $('#modalTitle').textContent = labelFor(row);
+  $('#modalTime').textContent = formatDate(row.created_at);
+  $('#modalDownload').href = video || image;
+  $('#deleteEventBtn').hidden = !canEditMedia();
+  $('#mediaModal').showModal();
+}
+
+async function createInvite() {
+  if (!state.activeDevice) return;
+  try {
+    const result = await invokeFaceGuard('create_invite', { device_id: state.activeDevice.id, role: $('#inviteRole').value });
+    $('#generatedInviteCode').textContent = result.invite_code;
+    $('#inviteResult').hidden = false;
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function acceptInvite(event) {
+  event.preventDefault();
+  const code = $('#inviteCodeInput').value.trim();
+  if (!code) return;
+  try {
+    const result = await invokeFaceGuard('accept_invite', { invite_code: code });
+    $('#inviteCodeInput').value = '';
+    await loadDevices(result.device_id);
+    toast('Kamera perkongsian berjaya ditambah');
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function removeMember(userId) {
+  if (!window.confirm('Buang akses pengguna ini daripada kamera?')) return;
+  try {
+    await invokeFaceGuard('remove_member', { device_id: state.activeDevice.id, user_id: userId });
+    await loadMembers();
+    toast('Akses pengguna dibuang');
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function checkForUpdate(showResult = true) {
+  try {
+    const { data, error } = await supabase
+      .from('faceguard_app_releases')
+      .select('version_code,version_name,apk_url,release_notes,published_at')
+      .order('version_code', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) {
+      $('#updateStatus').textContent = `Versi ${APP_VERSION} · belum ada release awam`;
+      return;
+    }
+    state.latestRelease = data;
+    let installedCode = APP_VERSION_CODE;
+    if (Capacitor.isNativePlatform()) {
+      const info = await App.getInfo();
+      installedCode = Number(info.build) || APP_VERSION_CODE;
+    }
+    const updateAvailable = data.version_code > installedCode;
+    $('#updateStatus').textContent = updateAvailable
+      ? `Versi ${data.version_name} tersedia`
+      : `Versi ${APP_VERSION} adalah terkini`;
+    $('#checkUpdateBtn').textContent = updateAvailable ? 'Muat turun' : 'Semak';
+    $('#checkUpdateBtn').dataset.downloadUrl = updateAvailable ? data.apk_url : '';
+    if (showResult) toast(updateAvailable ? `Update ${data.version_name} tersedia` : 'Aplikasi sudah versi terkini');
+    else if (updateAvailable) toast(`Kemas kini FaceGuard ${data.version_name} tersedia`);
+  } catch (error) {
+    $('#updateStatus').textContent = 'Semakan update gagal';
+    if (showResult) toast(error.message);
+  }
+}
+
+async function handleUpdateButton() {
+  const url = $('#checkUpdateBtn').dataset.downloadUrl;
+  if (!url) return checkForUpdate(true);
+  if (Capacitor.isNativePlatform()) await Browser.open({ url });
+  else window.open(url, '_blank', 'noopener');
 }
 
 function showPage(id, title) {
   document.querySelectorAll('.page').forEach((page) => page.classList.toggle('active', page.id === id));
   document.querySelectorAll('.nav-btn').forEach((button) => button.classList.toggle('active', button.dataset.page === id));
   $('#pageTitle').textContent = title;
-  if (id === 'eventsPage') { state.unread = 0; updateUnread(); }
+  if (id === 'eventsPage') {
+    state.unread = 0;
+    renderEvents();
+  }
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
-function openRow(row) {
-  const image = safeMediaUrl(row.image_url);
-  if (!image) return toast('Aktiviti ini tidak mempunyai gambar');
-  $('#modalImage').src = image;
-  $('#modalTitle').textContent = labelFor(row);
-  $('#modalTime').textContent = formatDate(row.created_at);
-  $('#modalDownload').href = safeMediaUrl(row.video_url) || image;
-  $('#modalDownload').textContent = safeMediaUrl(row.video_url) ? 'Buka / muat turun video AVI' : 'Buka gambar asal';
-  $('#mediaModal').hidden = false;
+function handleNativeBackButton() {
+  const openDialog = $('dialog[open]');
+  if (openDialog) {
+    openDialog.close();
+    return;
+  }
+
+  const activePage = $('.page.active');
+  if (!$('#appShell').hidden && activePage?.id !== 'homePage') {
+    showPage('homePage', 'Live');
+    return;
+  }
+
+  const now = Date.now();
+  if (now - state.lastBackPress > 2000) {
+    state.lastBackPress = now;
+    toast('Tekan Back sekali lagi untuk keluar');
+    return;
+  }
+
+  App.exitApp();
 }
 
+async function initializeSignedInApp() {
+  renderAuth();
+  if (state.inAppAlertsEnabled) $('#notificationStatus').textContent = 'Alert dalam aplikasi aktif';
+  if (state.initializePromise) return state.initializePromise;
+  state.initializePromise = (async () => {
+    try {
+      await loadDevices();
+      await checkForUpdate(false);
+    } catch (error) {
+      toast(error.message);
+    }
+  })().finally(() => {
+    state.initializePromise = null;
+  });
+  return state.initializePromise;
+}
+
+document.querySelectorAll('.auth-tab').forEach((button) => button.addEventListener('click', () => setAuthMode(button.dataset.authMode)));
+$('#authForm').addEventListener('submit', handleAuthSubmit);
 document.querySelectorAll('.nav-btn').forEach((button) => button.addEventListener('click', () => showPage(button.dataset.page, button.dataset.title)));
 document.querySelectorAll('.filter').forEach((button) => button.addEventListener('click', () => {
   state.filter = button.dataset.filter;
   document.querySelectorAll('.filter').forEach((item) => item.classList.toggle('active', item === button));
   renderEvents();
 }));
-$('#refreshBtn').addEventListener('click', () => loadActivities(true));
-$('#notifyBtn').addEventListener('click', requestNotifications);
-$('#settingsNotifyBtn').addEventListener('click', requestNotifications);
-$('#viewLatestBtn').addEventListener('click', () => { const row = state.rows.find((item) => safeMediaUrl(item.image_url)); row ? openRow(row) : toast('Belum ada gambar'); });
-$('#eventList').addEventListener('click', (event) => { const item = event.target.closest('[data-row-id]'); if (item) openRow(state.rows.find((row) => row.id === Number(item.dataset.rowId))); });
-$('#galleryGrid').addEventListener('click', (event) => { const button = event.target.closest('[data-media-index]'); if (!button) return; const item = mediaItems()[Number(button.dataset.mediaIndex)]; item.type === 'image' ? openRow(item.row) : window.open(item.url, '_blank', 'noopener'); });
-$('#closeModal').addEventListener('click', () => { $('#mediaModal').hidden = true; });
-$('#mediaModal').addEventListener('click', (event) => { if (event.target === $('#mediaModal')) $('#mediaModal').hidden = true; });
-window.addEventListener('beforeinstallprompt', (event) => { event.preventDefault(); state.installPrompt = event; $('#installBtn').disabled = false; });
-$('#installBtn').addEventListener('click', async () => {
-  if (state.installPrompt) { state.installPrompt.prompt(); await state.installPrompt.userChoice; state.installPrompt = null; }
-  else if (/iphone|ipad|ipod/i.test(navigator.userAgent)) $('#iosHelp').hidden = false;
-  else toast('Gunakan menu pelayar dan pilih “Install app”');
+
+$('#refreshBtn').addEventListener('click', async () => {
+  try {
+    await loadDevices(state.activeDevice?.id);
+    toast('FaceGuard dikemas kini');
+  } catch (error) {
+    toast(`Muat semula gagal: ${error.message}`);
+  }
+});
+$('#deviceSelect').addEventListener('change', async (event) => {
+  state.activeDevice = state.devices.find((device) => device.id === event.target.value) || null;
+  if (state.activeDevice) safeStorage.setItem('faceguard-active-device', state.activeDevice.id);
+  await selectActiveDevice();
+});
+$('#deviceList').addEventListener('click', async (event) => {
+  const item = event.target.closest('[data-device-id]');
+  if (!item) return;
+  state.activeDevice = state.devices.find((device) => device.id === item.dataset.deviceId) || null;
+  if (state.activeDevice) safeStorage.setItem('faceguard-active-device', state.activeDevice.id);
+  renderDeviceChooser();
+  await selectActiveDevice();
+  showPage('homePage', 'Live');
 });
 
-if (/iphone|ipad|ipod/i.test(navigator.userAgent)) $('#iosHelp').hidden = false;
-if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js'));
-window.addEventListener('online', () => loadActivities());
-window.addEventListener('offline', () => setConnection('CHANNEL_ERROR'));
+$('#quickAddDevice').addEventListener('click', openProvisioning);
+$('#addDeviceBtn').addEventListener('click', openProvisioning);
+$('#wifiForm').addEventListener('submit', createProvisionQr);
+$('#scanWifiQrBtn').addEventListener('click', startQrScanner);
+$('#chooseQrImageBtn').addEventListener('click', () => $('#scannerImageInput').click());
+$('#scannerImageInput').addEventListener('change', async (event) => {
+  await scanQrImageFile(event.target.files?.[0]);
+  event.target.value = '';
+});
+$('#qrScannerModal').addEventListener('close', () => stopQrScanner());
+$('#restartSetupBtn').addEventListener('click', () => {
+  stopPairingPoll();
+  $('#wifiStep').hidden = false;
+  $('#qrStep').hidden = true;
+});
+$('#provisionModal').addEventListener('close', stopPairingPoll);
+$('#toggleStreamBtn').addEventListener('click', () => {
+  if (state.streamActive || state.streamConnecting) stopStream({ manual: true });
+  else startStream({ automatic: false });
+});
+$('#snapshotBtn').addEventListener('click', requestSnapshot);
+$('#notifyBtn').addEventListener('click', requestNotifications);
+$('#settingsNotifyBtn').addEventListener('click', requestNotifications);
+$('#acceptInviteForm').addEventListener('submit', acceptInvite);
 
-loadActivities();
-subscribeRealtime();
+$('#eventList').addEventListener('click', (event) => {
+  const deleteButton = event.target.closest('[data-delete-row]');
+  if (deleteButton) return deleteEvent(state.rows.find((row) => row.id === Number(deleteButton.dataset.deleteRow)));
+  const item = event.target.closest('[data-row-id]');
+  if (item) openEvent(state.rows.find((row) => row.id === Number(item.dataset.rowId)));
+});
+$('#deleteEventBtn').addEventListener('click', () => deleteEvent(state.currentEvent));
+$('#mediaModal').addEventListener('close', () => {
+  $('#modalVideo').pause();
+  $('#modalVideo').src = '';
+});
+
+$('#createInviteBtn').addEventListener('click', () => {
+  $('#inviteResult').hidden = true;
+  $('#inviteModal').showModal();
+});
+$('#generateInviteBtn').addEventListener('click', createInvite);
+$('#copyInviteBtn').addEventListener('click', async () => {
+  await navigator.clipboard.writeText($('#generatedInviteCode').textContent);
+  toast('Kod jemputan disalin');
+});
+$('#memberList').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-remove-member]');
+  if (button) removeMember(button.dataset.removeMember);
+});
+
+$('#checkUpdateBtn').addEventListener('click', handleUpdateButton);
+$('#signOutBtn').addEventListener('click', () => supabase.auth.signOut());
+window.addEventListener('online', () => loadDevices(state.activeDevice?.id));
+window.addEventListener('offline', () => setConnection('CHANNEL_ERROR'));
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  if (state.autoStreamEnabled && !state.streamActive && !state.streamConnecting && streamUrl()) {
+    startStream({ automatic: true });
+  }
+});
+if ('serviceWorker' in navigator && !Capacitor.isNativePlatform()) window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js'));
+if (/iphone|ipad|ipod/i.test(navigator.userAgent)) $('#iosHelp').hidden = false;
+if (Capacitor.getPlatform() === 'android') App.addListener('backButton', handleNativeBackButton);
+
+supabase.auth.onAuthStateChange((event, session) => {
+  state.session = session;
+  renderAuth();
+  if (session && ['INITIAL_SESSION', 'SIGNED_IN'].includes(event)) initializeSignedInApp();
+  if (!session && event === 'SIGNED_OUT') {
+    stopStream({ manual: false });
+    stopActivityPolling();
+    stopPairingPoll();
+    if (state.channel) supabase.removeChannel(state.channel);
+    state.devices = [];
+    state.activeDevice = null;
+    renderAuth();
+  }
+});
+
+renderAuth();
