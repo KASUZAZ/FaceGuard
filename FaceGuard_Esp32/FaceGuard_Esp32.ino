@@ -63,7 +63,8 @@ void loadIdentity();
 bool readSetupQr();
 bool parseSetupPayload(const String& payload, String& ssid,
                        String& password, String& token);
-bool connectWiFi(uint32_t timeoutMs = 25000);
+bool ssidLooksLike5GHz(const String& ssid);
+bool connectWiFi(uint32_t timeoutMs = 12000);
 bool initializeCamera();
 void startCameraServers();
 bool provisionDevice();
@@ -212,6 +213,13 @@ bool parseSetupPayload(const String& payload, String& ssid,
          password.length() <= 63;
 }
 
+bool ssidLooksLike5GHz(const String& ssid) {
+  String normalized = ssid;
+  normalized.toLowerCase();
+  return normalized.indexOf("5ghz") >= 0 || normalized.endsWith("_5g") ||
+         normalized.endsWith("-5g") || normalized.endsWith(" 5g");
+}
+
 bool readSetupQr() {
   ESP32QRCodeReader reader(CAMERA_MODEL_AI_THINKER, FRAMESIZE_QVGA);
   const QRCodeReaderSetupErr result = reader.setup();
@@ -236,6 +244,11 @@ bool readSetupQr() {
     String newSetupToken;
     if (!parseSetupPayload(payload, newSsid, newPassword, newSetupToken)) {
       Serial.println("QR dibaca tetapi bukan QR setup FaceGuard.");
+      continue;
+    }
+    if (ssidLooksLike5GHz(newSsid)) {
+      Serial.printf("Wi-Fi '%s' kelihatan seperti rangkaian 5 GHz. Gunakan QR 2.4 GHz.\n",
+                    newSsid.c_str());
       continue;
     }
 
