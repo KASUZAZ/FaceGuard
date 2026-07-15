@@ -1,13 +1,13 @@
 import { createClient } from 'npm:@supabase/supabase-js@2.110.5';
+import { corsHeaders as sdkCorsHeaders } from 'npm:@supabase/supabase-js@2.110.5/cors';
 
 const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
+  ...sdkCorsHeaders,
   'Access-Control-Allow-Headers': [
-    'authorization', 'apikey', 'content-type', 'x-faceguard-action',
+    sdkCorsHeaders['Access-Control-Allow-Headers'], 'x-faceguard-action',
     'x-device-code', 'x-device-secret', 'x-event-kind', 'x-local-ip',
     'x-firmware-version', 'x-setup-token',
   ].join(', '),
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
 const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
