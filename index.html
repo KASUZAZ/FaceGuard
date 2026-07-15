@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="ms">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#8e1f2a">
+  <meta name="description" content="FaceGuard — pemantauan gerakan ESP32-CAM secara masa nyata.">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="FaceGuard">
+  <title>FaceGuard</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon.svg">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <div class="brand-row">
+        <div class="brand-mark" aria-hidden="true">F</div>
+        <div><span>FACEGUARD</span><h1 id="pageTitle">Kamera</h1></div>
+        <button id="refreshBtn" class="icon-btn" aria-label="Muat semula">↻</button>
+      </div>
+      <div class="status-row">
+        <span id="connectionBadge" class="status-pill connecting"><i></i>Menyambung</span>
+        <span id="lastSync">Belum diselaraskan</span>
+      </div>
+    </header>
+
+    <main>
+      <section id="homePage" class="page active" aria-labelledby="cameraHeading">
+        <article class="camera-card">
+          <div class="camera-head"><div><small>ESP32-CAM</small><h2 id="cameraHeading">Pintu hadapan</h2></div><span id="eventTotal">0 event</span></div>
+          <div id="cameraPreview" class="camera-preview">
+            <img id="latestImage" alt="Gambar terkini ESP32-CAM" hidden>
+            <div id="cameraEmpty" class="empty-preview"><b>Tiada gambar lagi</b><span>Hidupkan ESP32-CAM untuk mula memantau.</span></div>
+            <div class="camera-overlay"><span id="latestStatus">Menunggu kamera</span><time id="latestTime">—</time></div>
+          </div>
+          <div class="camera-metrics">
+            <div><span>Kaedah</span><b>Gerakan kamera</b></div>
+            <div><span>Data</span><b>Supabase</b></div>
+            <div><span>Mod</span><b>Automatik</b></div>
+          </div>
+        </article>
+
+        <div class="action-grid">
+          <button id="viewLatestBtn" class="primary-action">Lihat gambar terkini</button>
+          <button id="notifyBtn" class="secondary-action">Aktifkan notifikasi</button>
+        </div>
+
+        <article class="info-card"><span>✓</span><div><b>Pemantauan automatik aktif</b><p>ESP32-CAM membandingkan perubahan imej dan menghantar bukti apabila gerakan dikesan.</p></div></article>
+      </section>
+
+      <section id="eventsPage" class="page">
+        <div class="section-heading"><div><small>SECURITY LOG</small><h2>Aktiviti</h2></div><span id="unreadBadge">0 baharu</span></div>
+        <div class="filter-row" role="group" aria-label="Tapis aktiviti">
+          <button class="filter active" data-filter="all">Semua</button>
+          <button class="filter" data-filter="image">Gambar</button>
+          <button class="filter" data-filter="video">Video</button>
+        </div>
+        <div id="eventList" class="event-list"><div class="empty-state">Sedang mendapatkan aktiviti…</div></div>
+      </section>
+
+      <section id="galleryPage" class="page">
+        <div class="section-heading"><div><small>MEDIA CLOUD</small><h2>Galeri</h2></div><span id="mediaTotal">0 media</span></div>
+        <div id="galleryGrid" class="gallery-grid"><div class="empty-state">Belum ada media.</div></div>
+      </section>
+
+      <section id="settingsPage" class="page">
+        <div class="section-heading"><div><small>FACEGUARD</small><h2>Tetapan</h2></div></div>
+        <article class="settings-card">
+          <div><span class="setting-icon">⌂</span><div><b>Pasang aplikasi</b><small>Tambah FaceGuard pada skrin utama telefon.</small></div><button id="installBtn">Pasang</button></div>
+          <div><span class="setting-icon">◉</span><div><b>Notifikasi</b><small>Amaran ketika FaceGuard sedang dibuka.</small></div><button id="settingsNotifyBtn">Aktifkan</button></div>
+          <div><span class="setting-icon">↻</span><div><b>Realtime</b><small id="realtimeDetail">Sedang menyambung ke Supabase.</small></div><span id="realtimeDot" class="mini-dot"></span></div>
+        </article>
+        <article id="iosHelp" class="install-help" hidden><b>Cara pasang pada iPhone</b><p>Buka FaceGuard dalam Safari, tekan butang Share, kemudian pilih <strong>Add to Home Screen</strong>.</p></article>
+        <p class="privacy-note">Media disimpan dalam projek Supabase FaceGuard. Aplikasi ini tidak menggunakan kamera telefon.</p>
+      </section>
+    </main>
+
+    <nav class="bottom-nav" aria-label="Navigasi utama">
+      <button class="nav-btn active" data-page="homePage" data-title="Kamera"><span>⌂</span><small>Kamera</small></button>
+      <button class="nav-btn" data-page="eventsPage" data-title="Aktiviti"><span>!</span><small>Aktiviti</small><i id="navBadge" hidden>0</i></button>
+      <button class="nav-btn" data-page="galleryPage" data-title="Galeri"><span>▦</span><small>Galeri</small></button>
+      <button class="nav-btn" data-page="settingsPage" data-title="Tetapan"><span>⚙</span><small>Tetapan</small></button>
+    </nav>
+  </div>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+  <div id="mediaModal" class="modal" hidden>
+    <button id="closeModal" class="modal-close" aria-label="Tutup">×</button>
+    <div class="modal-content"><img id="modalImage" alt="Paparan media FaceGuard"><div><b id="modalTitle"></b><span id="modalTime"></span><a id="modalDownload" target="_blank" rel="noopener">Buka fail asal</a></div></div>
+  </div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

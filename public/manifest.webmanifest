@@ -1,0 +1,12 @@
+{
+  "name": "FaceGuard Security Camera",
+  "short_name": "FaceGuard",
+  "description": "Pemantauan gerakan ESP32-CAM secara masa nyata.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f3f5f7",
+  "theme_color": "#8e1f2a",
+  "lang": "ms",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

@@ -1,0 +1,5 @@
+node_modules/
+dist/
+FaceGuard_Esp32/
+*.tar.gz
+.DS_Store
