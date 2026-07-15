@@ -1,0 +1,5 @@
+/downloads/*.apk
+  Content-Type: application/vnd.android.package-archive
+  Content-Disposition: attachment
+  X-Content-Type-Options: nosniff
+  Cache-Control: public, max-age=3600

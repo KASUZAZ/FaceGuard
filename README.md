@@ -21,6 +21,17 @@ npm run dev
 npm run build
 ```
 
+## Bina APK Android
+
+```bash
+npm run android:sync
+cd android
+./gradlew assembleDebug
+```
+
+APK yang telah diuji disimpan sebagai `releases/FaceGuard-Android.apk`. Halaman
+`/download.html` menyediakan butang muat turun melalui Chrome.
+
 ## Sediakan ESP32-CAM
 
 1. Salin `FaceGuard_Esp32/secrets.example.h` sebagai `FaceGuard_Esp32/secrets.h`.

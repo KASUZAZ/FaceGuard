@@ -1,0 +1,8 @@
+{
+  "appId": "com.kasuzaz.faceguard",
+  "appName": "FaceGuard",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  }
+}
