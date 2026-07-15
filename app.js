@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import QRCode from 'qrcode';
+import jsQR from 'jsqr';
 import { Capacitor } from '@capacitor/core';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { PushNotifications } from '@capacitor/push-notifications';
@@ -8,8 +9,8 @@ import { App } from '@capacitor/app';
 
 const SUPABASE_URL = 'https://rerhdlfuiemsuzygjzqx.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_e-BT7oYj2e5sl07riD-kgQ_MLRUiaT6';
-const APP_VERSION = '2.0.0';
-const APP_VERSION_CODE = 2;
+const APP_VERSION = '2.1.0';
+const APP_VERSION_CODE = 3;
 const ONLINE_WINDOW_MS = 120_000;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
@@ -36,6 +37,9 @@ const state = {
   currentEvent: null,
   pushListenersReady: false,
   latestRelease: null,
+  scannerStream: null,
+  scannerFrame: null,
+  lastQrScanAt: 0,
 };
 
 const statusLabels = {
@@ -513,6 +517,118 @@ async function showMotionNotification(row) {
   }
 }
 
+function decodeWifiQrValue(value = '') {
+  return value.replace(/\\([\\;,:\"])/g, '$1');
+}
+
+function parseScannedWifiQr(rawValue = '') {
+  const value = String(rawValue).trim();
+  if (value.startsWith('FG1\n')) {
+    const parts = value.split('\n');
+    if (parts.length >= 4 && parts[2]) {
+      return { ssid: parts[2], password: parts.slice(3).join('\n') };
+    }
+  }
+  if (!value.toUpperCase().startsWith('WIFI:')) return null;
+  const fields = {};
+  const pattern = /([A-Z]):((?:\\.|[^;])*);/gi;
+  let match;
+  while ((match = pattern.exec(value.slice(5)))) {
+    fields[match[1].toUpperCase()] = decodeWifiQrValue(match[2]);
+  }
+  if (!fields.S) return null;
+  return { ssid: fields.S, password: fields.P || '' };
+}
+
+function stopQrScanner(closeDialog = false) {
+  if (state.scannerFrame) cancelAnimationFrame(state.scannerFrame);
+  state.scannerFrame = null;
+  state.scannerStream?.getTracks().forEach((track) => track.stop());
+  state.scannerStream = null;
+  const video = $('#qrScannerVideo');
+  video.pause();
+  video.srcObject = null;
+  if (closeDialog && $('#qrScannerModal').open) $('#qrScannerModal').close();
+}
+
+function acceptScannedWifiQr(value) {
+  const wifi = parseScannedWifiQr(value);
+  if (!wifi) {
+    $('#scannerStatus').textContent = 'QR dibaca, tetapi bukan QR Wi‑Fi. Cuba QR yang lain.';
+    return false;
+  }
+  $('#wifiSsid').value = wifi.ssid;
+  $('#wifiPassword').value = wifi.password;
+  stopQrScanner(true);
+  toast(`Wi‑Fi “${wifi.ssid}” berjaya diimbas`);
+  return true;
+}
+
+function scanQrVideoFrame(timestamp = 0) {
+  if (!state.scannerStream) return;
+  const video = $('#qrScannerVideo');
+  if (video.readyState >= 2 && timestamp - state.lastQrScanAt > 140) {
+    state.lastQrScanAt = timestamp;
+    const canvas = $('#qrScannerCanvas');
+    const maximumWidth = 640;
+    const scale = Math.min(1, maximumWidth / video.videoWidth);
+    canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+    canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+    const result = jsQR(pixels.data, pixels.width, pixels.height, { inversionAttempts: 'attemptBoth' });
+    if (result?.data && acceptScannedWifiQr(result.data)) return;
+  }
+  state.scannerFrame = requestAnimationFrame(scanQrVideoFrame);
+}
+
+async function startQrScanner() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    $('#scannerImageInput').click();
+    return;
+  }
+  $('#scannerStatus').textContent = 'Meminta kebenaran kamera…';
+  $('#qrScannerModal').showModal();
+  try {
+    state.scannerStream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+    });
+    const video = $('#qrScannerVideo');
+    video.srcObject = state.scannerStream;
+    await video.play();
+    $('#scannerStatus').textContent = 'Halakan kotak kepada QR Wi‑Fi';
+    state.lastQrScanAt = 0;
+    state.scannerFrame = requestAnimationFrame(scanQrVideoFrame);
+  } catch (error) {
+    stopQrScanner();
+    $('#scannerStatus').textContent = 'Kamera tidak dapat dibuka. Benarkan akses kamera atau pilih gambar QR.';
+    console.warn('QR scanner camera failed', error);
+  }
+}
+
+async function scanQrImageFile(file) {
+  if (!file) return;
+  try {
+    const bitmap = await createImageBitmap(file);
+    const canvas = $('#qrScannerCanvas');
+    const scale = Math.min(1, 1200 / bitmap.width);
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close();
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+    const result = jsQR(pixels.data, pixels.width, pixels.height, { inversionAttempts: 'attemptBoth' });
+    if (!result?.data || !acceptScannedWifiQr(result.data)) {
+      toast('QR Wi‑Fi tidak ditemui dalam gambar');
+    }
+  } catch {
+    toast('Gambar QR tidak dapat dibaca');
+  }
+}
+
 function openProvisioning() {
   if (!state.session) return;
   stopPairingPoll();
@@ -735,6 +851,13 @@ $('#deviceList').addEventListener('click', async (event) => {
 $('#quickAddDevice').addEventListener('click', openProvisioning);
 $('#addDeviceBtn').addEventListener('click', openProvisioning);
 $('#wifiForm').addEventListener('submit', createProvisionQr);
+$('#scanWifiQrBtn').addEventListener('click', startQrScanner);
+$('#chooseQrImageBtn').addEventListener('click', () => $('#scannerImageInput').click());
+$('#scannerImageInput').addEventListener('change', async (event) => {
+  await scanQrImageFile(event.target.files?.[0]);
+  event.target.value = '';
+});
+$('#qrScannerModal').addEventListener('close', () => stopQrScanner());
 $('#restartSetupBtn').addEventListener('click', () => {
   stopPairingPoll();
   $('#wifiStep').hidden = false;

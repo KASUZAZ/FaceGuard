@@ -1,6 +1,6 @@
 {
   "name": "faceguard-app",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -19,6 +19,7 @@
     "@capacitor/local-notifications": "8.2.1",
     "@capacitor/push-notifications": "8.1.2",
     "@supabase/supabase-js": "2.110.5",
+    "jsqr": "1.4.0",
     "qrcode": "1.5.4"
   },
   "devDependencies": {

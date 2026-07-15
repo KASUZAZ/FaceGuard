@@ -1,4 +1,4 @@
-# FaceGuard 2.0
+# FaceGuard 2.1
 
 FaceGuard ialah sistem kamera keselamatan ESP32-CAM yang menggunakan aplikasi
 Android, Supabase dan rangkaian Wi-Fi tempatan. Versi ini tidak memerlukan PIR:
@@ -6,8 +6,10 @@ kamera membandingkan imej untuk mengesan gerakan.
 
 ## Fungsi semasa
 
-- Setup Wi-Fi 2.4 GHz melalui QR dalam aplikasi; SSID dan kata laluan tidak
-  perlu dimasukkan dalam kod Arduino.
+- Kamera telefon boleh mengimbas QR Wi-Fi router/hotspot dan mengisi SSID serta
+  kata laluan secara automatik.
+- Setup ESP32 melalui QR dalam aplikasi; SSID dan kata laluan tidak perlu
+  dimasukkan dalam kod Arduino.
 - Live MJPEG terus daripada ESP32-CAM apabila telefon berada pada Wi-Fi sama.
 - Gambar automatik apabila gerakan dikesan dan butang snapshot manual.
 - Realtime activity, notifikasi tempatan, lihat dan padam gambar.
