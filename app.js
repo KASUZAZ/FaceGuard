@@ -7,12 +7,40 @@ import { App } from '@capacitor/app';
 
 const SUPABASE_URL = 'https://rerhdlfuiemsuzygjzqx.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_e-BT7oYj2e5sl07riD-kgQ_MLRUiaT6';
-const APP_VERSION = '2.1.2';
-const APP_VERSION_CODE = 5;
+const APP_VERSION = '2.1.3';
+const APP_VERSION_CODE = 6;
 const ONLINE_WINDOW_MS = 120_000;
 
+const memoryStorage = new Map();
+const safeStorage = {
+  getItem(key) {
+    try {
+      return window.localStorage.getItem(key);
+    } catch {
+      return memoryStorage.get(key) ?? null;
+    }
+  },
+  setItem(key, value) {
+    const stringValue = String(value);
+    memoryStorage.set(key, stringValue);
+    try {
+      window.localStorage.setItem(key, stringValue);
+    } catch {
+      // Some Android WebViews can temporarily deny storage during startup.
+    }
+  },
+  removeItem(key) {
+    memoryStorage.delete(key);
+    try {
+      window.localStorage.removeItem(key);
+    } catch {
+      // Keep the in-memory fallback usable when persistent storage is unavailable.
+    }
+  },
+};
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
-  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
+  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, storage: safeStorage },
 });
 
 const $ = (selector) => document.querySelector(selector);
@@ -34,7 +62,8 @@ const state = {
   toastTimer: null,
   currentEvent: null,
   initializePromise: null,
-  inAppAlertsEnabled: localStorage.getItem('faceguard-in-app-alerts') === 'true',
+  inAppAlertsEnabled: safeStorage.getItem('faceguard-in-app-alerts') === 'true',
+  lastBackPress: 0,
   latestRelease: null,
   scannerStream: null,
   scannerFrame: null,
@@ -215,9 +244,9 @@ async function loadDevices(preferredDeviceId = null) {
   state.devices = devicesResult.data || [];
   state.memberships = new Map((membershipsResult.data || []).map((membership) => [membership.device_id, membership]));
 
-  const saved = preferredDeviceId || localStorage.getItem('faceguard-active-device');
+  const saved = preferredDeviceId || safeStorage.getItem('faceguard-active-device');
   state.activeDevice = state.devices.find((device) => device.id === saved) || state.devices[0] || null;
-  if (state.activeDevice) localStorage.setItem('faceguard-active-device', state.activeDevice.id);
+  if (state.activeDevice) safeStorage.setItem('faceguard-active-device', state.activeDevice.id);
   renderDeviceChooser();
   renderDeviceList();
   await selectActiveDevice();
@@ -455,7 +484,7 @@ async function requestSnapshot() {
 async function requestNotifications() {
   if (Capacitor.isNativePlatform()) {
     state.inAppAlertsEnabled = true;
-    localStorage.setItem('faceguard-in-app-alerts', 'true');
+    safeStorage.setItem('faceguard-in-app-alerts', 'true');
     $('#notificationStatus').textContent = 'Alert dalam aplikasi aktif';
     toast('Alert FaceGuard diaktifkan');
     return;
@@ -768,6 +797,29 @@ function showPage(id, title) {
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
+function handleNativeBackButton() {
+  const openDialog = $('dialog[open]');
+  if (openDialog) {
+    openDialog.close();
+    return;
+  }
+
+  const activePage = $('.page.active');
+  if (!$('#appShell').hidden && activePage?.id !== 'homePage') {
+    showPage('homePage', 'Live');
+    return;
+  }
+
+  const now = Date.now();
+  if (now - state.lastBackPress > 2000) {
+    state.lastBackPress = now;
+    toast('Tekan Back sekali lagi untuk keluar');
+    return;
+  }
+
+  App.exitApp();
+}
+
 async function initializeSignedInApp() {
   renderAuth();
   if (state.inAppAlertsEnabled) $('#notificationStatus').textContent = 'Alert dalam aplikasi aktif';
@@ -804,14 +856,14 @@ $('#refreshBtn').addEventListener('click', async () => {
 });
 $('#deviceSelect').addEventListener('change', async (event) => {
   state.activeDevice = state.devices.find((device) => device.id === event.target.value) || null;
-  if (state.activeDevice) localStorage.setItem('faceguard-active-device', state.activeDevice.id);
+  if (state.activeDevice) safeStorage.setItem('faceguard-active-device', state.activeDevice.id);
   await selectActiveDevice();
 });
 $('#deviceList').addEventListener('click', async (event) => {
   const item = event.target.closest('[data-device-id]');
   if (!item) return;
   state.activeDevice = state.devices.find((device) => device.id === item.dataset.deviceId) || null;
-  if (state.activeDevice) localStorage.setItem('faceguard-active-device', state.activeDevice.id);
+  if (state.activeDevice) safeStorage.setItem('faceguard-active-device', state.activeDevice.id);
   renderDeviceChooser();
   await selectActiveDevice();
   showPage('homePage', 'Live');
@@ -871,6 +923,7 @@ window.addEventListener('online', () => loadDevices(state.activeDevice?.id));
 window.addEventListener('offline', () => setConnection('CHANNEL_ERROR'));
 if ('serviceWorker' in navigator && !Capacitor.isNativePlatform()) window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js'));
 if (/iphone|ipad|ipod/i.test(navigator.userAgent)) $('#iosHelp').hidden = false;
+if (Capacitor.getPlatform() === 'android') App.addListener('backButton', handleNativeBackButton);
 
 supabase.auth.onAuthStateChange((event, session) => {
   state.session = session;
