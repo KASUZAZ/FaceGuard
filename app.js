@@ -2,14 +2,13 @@ import { createClient } from '@supabase/supabase-js';
 import QRCode from 'qrcode';
 import jsQR from 'jsqr';
 import { Capacitor } from '@capacitor/core';
-import { LocalNotifications } from '@capacitor/local-notifications';
 import { Browser } from '@capacitor/browser';
 import { App } from '@capacitor/app';
 
 const SUPABASE_URL = 'https://rerhdlfuiemsuzygjzqx.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_e-BT7oYj2e5sl07riD-kgQ_MLRUiaT6';
-const APP_VERSION = '2.1.1';
-const APP_VERSION_CODE = 4;
+const APP_VERSION = '2.1.2';
+const APP_VERSION_CODE = 5;
 const ONLINE_WINDOW_MS = 120_000;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
@@ -35,6 +34,7 @@ const state = {
   toastTimer: null,
   currentEvent: null,
   initializePromise: null,
+  inAppAlertsEnabled: localStorage.getItem('faceguard-in-app-alerts') === 'true',
   latestRelease: null,
   scannerStream: null,
   scannerFrame: null,
@@ -454,20 +454,10 @@ async function requestSnapshot() {
 
 async function requestNotifications() {
   if (Capacitor.isNativePlatform()) {
-    try {
-      let localPermission = await LocalNotifications.checkPermissions();
-      if (localPermission.display === 'prompt') localPermission = await LocalNotifications.requestPermissions();
-      if (localPermission.display !== 'granted') throw new Error('Kebenaran notifikasi ditolak.');
-      await LocalNotifications.createChannel({
-        id: 'faceguard_alerts', name: 'Amaran FaceGuard', description: 'Amaran gerakan kamera',
-        importance: 5, visibility: 1, vibration: true, lights: true,
-      });
-      $('#notificationStatus').textContent = 'Alert tempatan aktif';
-      toast('Notifikasi FaceGuard diaktifkan');
-    } catch (error) {
-      $('#notificationStatus').textContent = error.message;
-      toast(error.message);
-    }
+    state.inAppAlertsEnabled = true;
+    localStorage.setItem('faceguard-in-app-alerts', 'true');
+    $('#notificationStatus').textContent = 'Alert dalam aplikasi aktif';
+    toast('Alert FaceGuard diaktifkan');
     return;
   }
   if (!('Notification' in window)) return toast('Notifikasi tidak disokong pada pelayar ini.');
@@ -480,14 +470,7 @@ async function showMotionNotification(row) {
   const title = 'FaceGuard: gerakan dikesan';
   const body = `${state.activeDevice?.name || 'Kamera'} · ${labelFor(row)}`;
   if (Capacitor.isNativePlatform()) {
-    const permission = await LocalNotifications.checkPermissions();
-    if (permission.display === 'granted') {
-      await LocalNotifications.schedule({ notifications: [{
-        id: Number(row.id) % 2_000_000_000, title, body,
-        channelId: 'faceguard_alerts', schedule: { at: new Date(Date.now() + 200) },
-        extra: { event_id: row.id, device_id: row.device_id },
-      }] });
-    }
+    if (state.inAppAlertsEnabled && navigator.vibrate) navigator.vibrate([180, 100, 180]);
   } else if ('Notification' in window && Notification.permission === 'granted') {
     new Notification(title, { body, icon: '/icon.svg', tag: `faceguard-${row.id}` });
   }
@@ -787,6 +770,7 @@ function showPage(id, title) {
 
 async function initializeSignedInApp() {
   renderAuth();
+  if (state.inAppAlertsEnabled) $('#notificationStatus').textContent = 'Alert dalam aplikasi aktif';
   if (state.initializePromise) return state.initializePromise;
   state.initializePromise = (async () => {
     try {
