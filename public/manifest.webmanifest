@@ -1,7 +1,7 @@
 {
   "name": "FaceGuard Security Camera",
   "short_name": "FaceGuard",
-  "description": "Pemantauan gerakan ESP32-CAM secara masa nyata.",
+  "description": "CCTV ESP32-CAM dengan pengesanan orang jatuh pada server.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

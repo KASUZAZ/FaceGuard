@@ -1,8 +1,13 @@
 {
-  "appId": "com.kasuzaz.faceguard",
+  "appId": "com.segermohana.faceguard",
   "appName": "FaceGuard",
   "webDir": "dist",
   "server": {
     "androidScheme": "https"
+  },
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    }
   }
 }

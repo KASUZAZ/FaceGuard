@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: faceguard-inference
+    runtime: python
+    plan: free
+    region: singapore
+    rootDir: inference_server
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      - key: POSE_MODEL
+        value: yolo26n-pose.pt
+      - key: INFERENCE_FPS
+        value: "5"
+      - key: FALL_CONFIRM_SECONDS
+        value: "1.5"
+      - key: FALL_TRANSITION_SECONDS
+        value: "8"
+      - key: FALL_COOLDOWN_SECONDS
+        value: "30"
+      - key: ALLOWED_ORIGINS
+        value: https://dazzling-valkyrie-40ada0.netlify.app,https://localhost,http://localhost,capacitor://localhost
+      - key: SUPABASE_URL
+        value: https://nscqzfkuanfgxzfwukty.supabase.co
+      - key: SUPABASE_PUBLISHABLE_KEY
+        value: sb_publishable_GFljHorRTltHpWAEfz_PMg_oNa0YmF5
+      - key: FACEGUARD_DEVICE_TOKEN
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false

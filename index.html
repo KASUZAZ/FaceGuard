@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#8e1f2a">
-  <meta name="description" content="FaceGuard — pemantauan gerakan ESP32-CAM secara masa nyata.">
+  <meta name="description" content="FaceGuard — CCTV ESP32-CAM dengan pengesanan orang jatuh pada server.">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="FaceGuard">
@@ -31,16 +31,16 @@
     <main>
       <section id="homePage" class="page active" aria-labelledby="cameraHeading">
         <article class="camera-card">
-          <div class="camera-head"><div><small>ESP32-CAM</small><h2 id="cameraHeading">Pintu hadapan</h2></div><span id="eventTotal">0 event</span></div>
+          <div class="camera-head"><div><small>ESP32-CAM · AI SERVER</small><h2 id="cameraHeading">Pintu hadapan</h2></div><span id="eventTotal">0 event</span></div>
           <div id="cameraPreview" class="camera-preview">
             <img id="latestImage" alt="Gambar terkini ESP32-CAM" hidden>
-            <div id="cameraEmpty" class="empty-preview"><b>Tiada gambar lagi</b><span>Hidupkan ESP32-CAM untuk mula memantau.</span></div>
+            <div id="cameraEmpty" class="empty-preview"><b id="cameraEmptyTitle">Menunggu CCTV</b><span id="cameraEmptyDetail">Hidupkan ESP32-CAM dan inference server.</span></div>
             <div class="camera-overlay"><span id="latestStatus">Menunggu kamera</span><time id="latestTime">—</time></div>
           </div>
           <div class="camera-metrics">
-            <div><span>Kaedah</span><b>Gerakan kamera</b></div>
-            <div><span>Data</span><b>Supabase</b></div>
-            <div><span>Mod</span><b>Automatik</b></div>
+            <div><span>Kaedah</span><b>AI Pose</b></div>
+            <div><span>Video</span><b id="liveFps">0 FPS</b></div>
+            <div><span>Alert</span><b>Supabase</b></div>
           </div>
         </article>
 
@@ -49,7 +49,7 @@
           <button id="notifyBtn" class="secondary-action">Aktifkan notifikasi</button>
         </div>
 
-        <article class="info-card"><span>✓</span><div><b>Pemantauan automatik aktif</b><p>ESP32-CAM membandingkan perubahan imej dan menghantar bukti apabila gerakan dikesan.</p></div></article>
+        <article class="info-card"><span>✓</span><div><b>Fall detection pada server</b><p>ESP32-CAM menghantar frame dan server mengesahkan perubahan pose daripada berdiri kepada jatuh.</p></div></article>
       </section>
 
       <section id="eventsPage" class="page">
@@ -69,13 +69,48 @@
 
       <section id="settingsPage" class="page">
         <div class="section-heading"><div><small>FACEGUARD</small><h2>Tetapan</h2></div></div>
+        <form id="authForm" class="setup-card auth-card">
+          <b>Akaun FaceGuard</b>
+          <p id="authStatus">Log masuk untuk melindungi kamera, aktiviti dan media anda.</p>
+          <div id="authFields">
+            <label>E-mel<input id="authEmailInput" type="email" placeholder="nama@email.com" autocomplete="email" required></label>
+            <label>Kata laluan<input id="authPasswordInput" type="password" minlength="8" placeholder="Sekurang-kurangnya 8 aksara" autocomplete="current-password" required></label>
+            <div class="form-actions"><button type="submit">Log masuk</button><button id="signUpBtn" type="button" class="outline-button">Daftar</button></div>
+          </div>
+          <button id="signOutBtn" type="button" class="outline-button" hidden>Log keluar</button>
+          <small>Supabase Auth digunakan supaya hanya pemilik boleh melihat bukti CCTV.</small>
+        </form>
         <article class="settings-card">
           <div><span class="setting-icon">⌂</span><div><b>Pasang aplikasi</b><small>Tambah FaceGuard pada skrin utama telefon.</small></div><button id="installBtn">Pasang</button></div>
           <div><span class="setting-icon">◉</span><div><b>Notifikasi</b><small>Amaran ketika FaceGuard sedang dibuka.</small></div><button id="settingsNotifyBtn">Aktifkan</button></div>
           <div><span class="setting-icon">↻</span><div><b>Realtime</b><small id="realtimeDetail">Sedang menyambung ke Supabase.</small></div><span id="realtimeDot" class="mini-dot"></span></div>
+          <div><span class="setting-icon">▣</span><div><b>Inference server</b><small id="cameraConnectionDetail">Belum dikonfigurasi.</small></div><span id="cameraDot" class="mini-dot"></span></div>
         </article>
+        <form id="cameraSetupForm" class="setup-card" hidden>
+          <b>Sambungan dan tetapan CCTV</b>
+          <section class="pairing-panel">
+            <b>Pair ESP32-CAM kali pertama</b>
+            <p>1. Sambung telefon ke Wi‑Fi yang bermula dengan <strong>FACEGUARD-</strong> (kata laluan <strong>FaceGuard2026!</strong>). 2. Kembali ke aplikasi, isi Wi‑Fi 2.4 GHz di bawah dan tekan Sambungkan ESP32.</p>
+            <label>Nama Wi‑Fi 2.4 GHz<input id="pairWifiSsidInput" type="text" placeholder="Contoh: WiFi-Rumah-2.4G" maxlength="32" autocomplete="off"></label>
+            <label>Kata laluan Wi‑Fi<input id="pairWifiPasswordInput" type="password" placeholder="Kata laluan Wi‑Fi" maxlength="63" autocomplete="new-password"></label>
+            <button id="pairEsp32Btn" type="button">Sambungkan ESP32</button>
+            <small id="pairingStatus">Pairing terus tersedia dalam APK Android v2.1.3.</small>
+          </section>
+          <label>Nama kamera<input id="cameraNameInput" type="text" placeholder="Kamera pintu hadapan" maxlength="80" autocomplete="off"></label>
+          <label>Lokasi<input id="cameraLocationInput" type="text" placeholder="Ruang tamu" maxlength="120" autocomplete="off"></label>
+          <label>URL inference server<input id="serverUrlInput" type="url" placeholder="https://faceguard-inference.onrender.com" autocomplete="url"></label>
+          <label>Device ID<input id="deviceIdInput" type="text" placeholder="kamera-hadapan" maxlength="64" autocomplete="off"></label>
+          <div class="settings-grid">
+            <label>FPS CCTV<input id="targetFpsInput" type="number" value="25" min="1" max="25" inputmode="numeric"></label>
+            <label>FPS AI<input id="inferenceFpsInput" type="number" value="5" min="1" max="10" inputmode="numeric"></label>
+            <label>Sahkan jatuh (s)<input id="fallConfirmInput" type="number" value="1.5" min="0.5" max="10" step="0.1" inputmode="decimal"></label>
+            <label class="toggle-label"><input id="detectionEnabledInput" type="checkbox" checked> Fall detection aktif</label>
+          </div>
+          <button type="submit">Simpan ke Supabase dan sambung CCTV</button>
+          <small>Device ID mesti sama dengan firmware. Paparan CCTV dilindungi secara automatik oleh akaun Supabase anda.</small>
+        </form>
         <article id="iosHelp" class="install-help" hidden><b>Cara pasang pada iPhone</b><p>Buka FaceGuard dalam Safari, tekan butang Share, kemudian pilih <strong>Add to Home Screen</strong>.</p></article>
-        <p class="privacy-note">Media disimpan dalam projek Supabase FaceGuard. Aplikasi ini tidak menggunakan kamera telefon.</p>
+        <p class="privacy-note">Live 25 FPS diproses oleh inference server tanpa menyimpan setiap frame. Tetapan, status, event dan bukti kejadian jatuh disimpan secara private dalam Supabase.</p>
       </section>
     </main>
 
