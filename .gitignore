@@ -1,11 +1,23 @@
 node_modules/
 dist/
+.env
+.venv/
+__pycache__/
+*.pt
+test_output/
 FaceGuard_Esp32/secrets.h
 FaceGuard_Esp32/.git/
+FaceGuard_Esp32/build/
 android/.gradle/
 android/app/build/
 android/build/
+.tools/
+android/keystore.properties
 *.jks
 *.keystore
 *.tar.gz
+releases/FaceGuard-Android-v*.apk
 .DS_Store
+
+# Local Netlify folder
+.netlify
